@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Шаблон launchd Agent. Маркеры __HOME__ и __PROJECT__ подставляются скриптом
+  svc-install.sh из реальных значений на текущей машине. Не редактируй вручную —
+  меняй переменные в svc-install.sh.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.muraveika.transcriber</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROJECT__/.venv/bin/python</string>
+    <string>-u</string>
+    <string>__PROJECT__/app.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>__PROJECT__/logs/transcriber.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__PROJECT__/logs/transcriber.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>Nice</key>
+  <integer>5</integer>
+</dict>
+</plist>

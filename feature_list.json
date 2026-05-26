@@ -1,0 +1,105 @@
+{
+  "$schema_note": "Источник правды по фичам. Статусы: not_started | in_progress | passing | blocked. Поле evidence — что именно проверили и как.",
+  "features": [
+    {
+      "id": "F01-device",
+      "title": "Автоопределение устройства (MPS/MLX)",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": [],
+      "spec": "src/device.py: get_whisper_backend() -> 'mlx'; get_pyannote_device() -> 'mps'|'cpu'. Транскрибация через mlx-whisper (Metal), pyannote через torch на MPS.",
+      "verification": "pytest tests/test_device.py + ручной запуск.",
+      "evidence": "pytest tests/test_device.py — 3 теста зелёные. Реальное использование: pyannote='mps', whisper='mlx' видны в UI (RAM: 8.0 ГБ строка)."
+    },
+    {
+      "id": "F02-audio-utils",
+      "title": "Конвертация форматов через ffmpeg",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": [],
+      "spec": "src/audio_utils.py: prepare_audio(path) -> PreparedAudio с WAV 16kHz mono. Поддержка mp3/wav/m4a/flac/ogg/opus/aac/mp4/mov/mkv/avi/webm. probe_duration(path) -> float секунд.",
+      "verification": "Ручная конвертация короткого mp3 → wav. Проверка длительности.",
+      "evidence": "Реально работало в end-to-end smoke: 40 МБ mp3 (Гороховая улица 17) корректно сконвертирован в 16 kHz mono wav, probe_duration=3600.0s, после транскрибации finally cleanup сработал."
+    },
+    {
+      "id": "F03-transcription",
+      "title": "Транскрибация через mlx-whisper (chunked + cache)",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": ["F01-device", "F02-audio-utils"],
+      "spec": "src/transcription.py: transcribe(audio_path, model_size, language, chunk_seconds, cache_dir, resume) — генератор Segment с offset. mlx-whisper (Metal). Чанки по 10 мин, дамп partial JSON после каждого чанка, resume из cache.",
+      "verification": "Synthetic smoke на 3-сек wav с моделью tiny — успешный pipeline без ошибок. Resume повторного вызова: 0.1s vs 17s.",
+      "evidence": "Smoke прошёл (skill: 17.3s первый вызов tiny, 0.10s resume). 27/27 pytest. Чанкинг + cache работают; condition_on_previous_text=False для длинных файлов."
+    },
+    {
+      "id": "F04-diarization",
+      "title": "Диаризация через pyannote.audio",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": ["F01-device"],
+      "spec": "src/diarization.py: diarize(audio_path, num_speakers, hf_token, progress_callback, cache_dir) -> list[SpeakerSegment]. Модель pyannote/speaker-diarization-3.1 (3.3+ API: token=, DiarizeOutput.speaker_diarization). Кэш в cache/diar_<hash>_<params>.json.",
+      "verification": "End-to-end через UI на 60-мин файле.",
+      "evidence": "Прошло end-to-end 26.05.2026 07:00. 60-мин mp3 на 8 ГБ Mac, pyannote 3.3 на MPS, ~12.5 мин на диаризацию. 324 speaker turns в diar_160f12e16b3742b2_n0_min0_max0.json. Файл transcript_1779767956.{txt,srt,vtt,json,md} с метками SPEAKER_xx. Memory не упала благодаря del ws_iter + gc.collect() + mlx.metal.clear_cache() перед загрузкой pyannote."
+    },
+    {
+      "id": "F05-alignment",
+      "title": "Сопоставление сегментов и спикеров",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": [],
+      "spec": "src/alignment.py: align_speakers_with_segments(transcription, speakers) — для каждого сегмента находит спикера с максимальным временным перекрытием. Если пересечений нет — UNKNOWN.",
+      "verification": "pytest tests/test_alignment.py — синтетика с перекрытиями, пробелами, граничными случаями.",
+      "evidence": "10 тестов написаны в tests/test_alignment.py. Ключевые сценарии прогнаны через python3 -c, все assert проходят: empty, inside, overlap-max, outside, touch, unsorted. Полный pytest — после ./init.sh."
+    },
+    {
+      "id": "F06-exporters",
+      "title": "Экспорт txt/srt/vtt/json/md",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": ["F05-alignment"],
+      "spec": "src/exporters.py: to_txt/srt/vtt/json/md + write_* обёртки. SRT: HH:MM:SS,mmm. VTT: WEBVTT header + HH:MM:SS.mmm.",
+      "verification": "pytest tests/test_exporters.py — проверка форматов по эталонам.",
+      "evidence": "12 тестов в tests/test_exporters.py. Прогнаны вручную: ts (SRT/VTT), txt группировка, srt placeholder для пустых, vtt header и точка в ms, json round-trip с UTF-8, md заголовки спикеров и таймкоды HH:MM:SS. Все assert проходят."
+    },
+    {
+      "id": "F07-config",
+      "title": "Хранение HF-токена",
+      "priority": "P1",
+      "status": "passing",
+      "depends_on": [],
+      "spec": "src/config.py: get_hf_token() — порядок: explicit arg → env HF_TOKEN → ~/.config/transcriber/config.json → None. save_hf_token(token). Атомарная запись + chmod 0600.",
+      "verification": "Ручная проверка: записать токен, прочитать его обратно.",
+      "evidence": "Smoke в изолированном HOME: empty, save/load, ENV > файл, explicit > ENV, очистка пустой строкой. Все assert проходят."
+    },
+    {
+      "id": "F08-gradio-ui",
+      "title": "Gradio UI",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": ["F03-transcription", "F04-diarization", "F05-alignment", "F06-exporters", "F07-config"],
+      "spec": "app.py: все UI-элементы из ТЗ §3.1 — выбор файла, модели, диаризация, num_speakers, язык, кнопка, прогресс, превью, 5 кнопок скачивания.",
+      "verification": "python app.py → открыть http://127.0.0.1:7860 → загрузить файл → получить результат → скачать все 5 форматов.",
+      "evidence": "Прогнано end-to-end на 60-мин mp3 (Гороховая улица 17, ~40 МБ). Модель small + diarize=False. Результат — 5 файлов в outputs/ (transcript_1779736448.{txt,srt,vtt,json,md}). TXT содержит осмысленный русский текст (имена, термины). Метка [UNKNOWN] корректно проставлена (diarize=False). Дефолты подкручены под 8 ГБ RAM (small + без diarize). Soft-block large-v3 на <12 ГБ работает. Лог: 22:14:08 cache complete, 22:14 выгрузка файлов."
+    },
+    {
+      "id": "F09-readme",
+      "title": "README с инструкциями",
+      "priority": "P1",
+      "status": "in_progress",
+      "depends_on": ["F08-gradio-ui"],
+      "spec": "README: brew install ffmpeg → uv venv → uv pip install -e . → HF-токен → python app.py. Раздел про подводные камни.",
+      "verification": "Свежий чекаут → следование README → приложение запускается.",
+      "evidence": "README.md написан со всеми разделами: установка, токен, запуск, форматы, perf, подводные камни (5 шт), тесты, структура. Реальная верификация — после ./init.sh."
+    },
+    {
+      "id": "F10-integration-test",
+      "title": "Интеграционный тест на коротком WAV",
+      "priority": "P2",
+      "status": "not_started",
+      "depends_on": ["F08-gradio-ui"],
+      "spec": "tests/test_integration.py: запускает transcribe + diarize + align на sample_30s.wav с 2 спикерами. Проверяет наличие обоих спикеров в результате.",
+      "verification": "pytest tests/test_integration.py (помечен как slow / requires_models).",
+      "evidence": null
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# Секреты
+.env
+.env.local
+
+# Артефакты приложения
+cache/
+outputs/
+*.log
+logs/*.log
+
+# Модели (могут весить ГБ, скачиваются при первом запуске)
+models/
+.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store

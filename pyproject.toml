@@ -1,0 +1,61 @@
+[project]
+name = "transcriber"
+version = "0.1.0"
+description = "Локальный сервис транскрибации аудио с диаризацией (Apple Silicon, offline)"
+requires-python = ">=3.10,<3.14"
+readme = "README.md"
+
+# Зависимости. Под Apple Silicon — mlx-whisper (Metal-ускорение, в 5-8× быстрее
+# faster-whisper на CPU+int8 для long-form). На других платформах фолбэка нет:
+# проект изначально только под macOS arm64 (см. ТЗ §2).
+dependencies = [
+    "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "pyannote.audio>=3.3.0",
+    "gradio>=4.40.0",
+    "torch>=2.3.0",
+    "torchaudio>=2.3.0",
+    "ffmpeg-python>=0.2.0",
+    "pydantic>=2.0",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+# target-version влияет только на стиль; ниже минимально поддерживаемой версии не опускаем.
+target-version = "py310"
+
+[tool.ruff.lint]
+# E,F — pyflakes/pycodestyle базовый; I — изортировка; B — bugbear;
+# UP — pyupgrade. Сознательно не включаем D (docstrings) — лишний шум.
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E501"]  # длинные строки — на усмотрение, line-length уже задан
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Маркер slow — для тестов, которые требуют моделей/сети.
+# По умолчанию их не запускаем: pytest -m "not slow"
+markers = [
+    "slow: integration tests that require downloaded models or network",
+]
+addopts = "-m 'not slow'"
+
+[tool.mypy]
+python_version = "3.10"
+strict_optional = true
+warn_unused_ignores = true
+ignore_missing_imports = true  # большинство ML-либ без stubs
