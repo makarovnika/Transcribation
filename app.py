@@ -249,6 +249,7 @@ def _run_pipeline(
     meeting_title: str = "",   # F12: название встречи для slug
     denoise: bool = False,     # F15: шумоподавление + нормализация громкости
     word_timestamps: bool = False,  # F20: word-level timestamps в JSON
+    mic_file: str | None = None,    # F16: запись с микрофона (альтернативный источник)
     progress: gr.Progress = gr.Progress(),
 ) -> tuple[str, str, str | None, str | None, str | None, str | None, str | None]:
     """Возвращает кортеж для gr.outputs:
@@ -258,13 +259,22 @@ def _run_pipeline(
     Gradio как «текущая директория» и приводит к IsADirectoryError при кэшировании.
     """
     log.info(
-        "click: file=%r model=%s diarize=%s num_speakers=%s lang=%s token_in=%s save=%s",
-        audio_file, model_size, do_diarize, num_speakers, language_choice,
+        "click: file=%r mic=%r model=%s diarize=%s num_speakers=%s lang=%s token_in=%s save=%s",
+        audio_file, mic_file, model_size, do_diarize, num_speakers, language_choice,
         bool(hf_token_input), save_token,
     )
 
+    # F16: если drop zone пуст — используем запись с микрофона.
+    # Если оба — приоритет у drop zone (пользователь явно выбрал файл).
     if not audio_file:
-        return ("", "Ошибка: файл не выбран.", None, None, None, None, None, [], {})
+        if mic_file:
+            log.info("используем запись с микрофона: %s", mic_file)
+            audio_file = mic_file
+        else:
+            return ("", "Ошибка: файл не выбран и микрофон не записан.",
+                    None, None, None, None, None, [], {})
+    elif mic_file:
+        log.warning("заполнены оба источника — использую drop zone, микрофон игнорю")
 
     # Soft-block для тяжёлых пресетов на машинах с малым RAM.
     # Не запускаем — потому что OOM-kill происходит молча (jetsam), без feedback
@@ -321,11 +331,34 @@ def _run_pipeline(
         )
 
     # Прогресс-колбэк, который пишет в Gradio. Подписываем этапы по доле.
-    # Этапы: prepare 0..0.05, transcribe 0.05..0.7, diarize 0.7..0.95, export 0.95..1.0
+    # Этапы: prepare 0..0.05, transcribe 0.05..0.7, diarize 0.7..0.95, export 0.95..1.0.
+    # F13.1: считаем ETA — оставшееся время по уже пройденной доле и затраченному времени.
+    # Стартовое время фиксируем здесь (t0 переменная объявляется ниже).
+    eta_t0 = time.time()
+
+    def _format_eta(remaining_sec: float) -> str:
+        if remaining_sec < 1:
+            return ""
+        if remaining_sec < 60:
+            return f"~{int(remaining_sec)}с"
+        m, s = divmod(int(remaining_sec), 60)
+        if m < 60:
+            return f"~{m}м {s:02d}с"
+        h, m = divmod(m, 60)
+        return f"~{h}ч {m:02d}м"
+
     def _make_progress(stage_lo: float, stage_hi: float, label: str):
         def cb(stage: str, fraction: float, note: str) -> None:
             value = stage_lo + (stage_hi - stage_lo) * fraction
-            progress(value, desc=f"{label}: {note}")
+            # ETA по общей доле, не локальной. Точнее показывает «сколько ждать всего».
+            elapsed = time.time() - eta_t0
+            if value > 0.02:  # на самом старте формула даёт огромное число — не показываем
+                eta_sec = elapsed / value * (1 - value)
+                eta_str = _format_eta(eta_sec)
+                eta_suffix = f" · осталось {eta_str}" if eta_str else ""
+            else:
+                eta_suffix = ""
+            progress(value, desc=f"{label}: {note}{eta_suffix}")
         return cb
 
     prepared: audio_utils.PreparedAudio | None = None
@@ -684,7 +717,25 @@ def build_ui() -> gr.Blocks:
     )
     token_line = _token_status_line()
 
-    with gr.Blocks(title="Локальный транскрибатор") as demo:
+    # F13: индиго-тема, тёмный фон, шрифт Inter (близкий к macOS SF Pro).
+    # Если GoogleFont не загрузится (оффлайн) — Gradio мягко откатится на дефолт.
+    try:
+        theme = gr.themes.Soft(
+            primary_hue="indigo",
+            neutral_hue="slate",
+            font=gr.themes.GoogleFont("Inter"),
+        ).set(
+            body_background_fill="*neutral_950",
+            background_fill_primary="*neutral_900",
+            block_background_fill="*neutral_900",
+            block_border_color="*neutral_800",
+            button_primary_background_fill="*primary_600",
+        )
+    except Exception as e:
+        log.warning("custom theme failed, falling back to default: %s", e)
+        theme = gr.themes.Soft()
+
+    with gr.Blocks(title="Локальный транскрибатор", theme=theme) as demo:
         gr.Markdown(
             f"""
             # Локальный транскрибатор (offline)
@@ -716,6 +767,14 @@ def build_ui() -> gr.Blocks:
                         ".mp4", ".mov", ".mkv", ".avi", ".webm",
                     ],
                     type="filepath",
+                )
+                # F16: альтернативный источник — запись с микрофона.
+                # Если оба источника заполнены, приоритет у drop zone (см. _run_pipeline).
+                # type="filepath" → Gradio возвращает путь к временному WAV.
+                mic_in = gr.Audio(
+                    sources=["microphone"],
+                    type="filepath",
+                    label="Или запиши с микрофона",
                 )
                 model_in = gr.Dropdown(
                     label="Модель Whisper",
@@ -800,6 +859,14 @@ def build_ui() -> gr.Blocks:
                 run_btn = gr.Button("Транскрибировать", variant="primary")
 
             with gr.Column(scale=3):
+                # F13: empty-state карточка над статусом — пока файл не загружен,
+                # показываем подсказку. После первого click её можно оставить
+                # (не критично — пользователь увидит результат внизу).
+                gr.Markdown(
+                    "_Загрузите файл слева, выберите параметры и нажмите_ "
+                    "**Транскрибировать**_._",
+                    elem_id="empty-state-hint",
+                )
                 status_out = gr.Textbox(label="Статус", lines=6, interactive=False)
                 preview_out = gr.Textbox(label="Результат", lines=20, interactive=False)
 
@@ -872,6 +939,7 @@ def build_ui() -> gr.Blocks:
                 title_in,    # F12: meeting_title
                 denoise_in,  # F15: denoise flag
                 word_ts_in,  # F20: word-level timestamps
+                mic_in,      # F16: микрофон-источник
             ],
             outputs=[
                 preview_out,

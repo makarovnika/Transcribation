@@ -126,11 +126,11 @@
       "id": "F13-ui-redesign",
       "title": "Тёмная тема и переработка иерархии UI",
       "priority": "P0",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F08-gradio-ui"],
       "spec": "См. TZ-v2-improvements.md §F13. gr.themes.Soft(primary_hue='indigo'), reshape layout по outputs/ui-mockup.html. ETA в прогрессе через скользящее среднее. Состояния empty/error/success как отдельные плашки.",
       "verification": "Скриншоты до/после в claude-progress.md. E2E на коротком файле — все этапы прогресса видны.",
-      "evidence": null
+      "evidence": "Сделано: gr.themes.Soft(primary_hue='indigo', neutral_hue='slate', font=Inter) с fallback на дефолт. ETA через elapsed/value*(1-value), формат '~Xм YYс'. Empty-state hint markdown над status. НЕ сделано: полный reshape layout по mockup — мокапа в проекте нет (outputs/ui-mockup.html отсутствует). Все 4 этапа прогресса одной строкой и Tabs для Резюме/Action items — требует F19 (Ollama). E2E — пользователь увидит новую тему при следующем restart."
     },
     {
       "id": "F14-meeting-history",
@@ -186,11 +186,11 @@
       "id": "F16-mic-recording",
       "title": "Запись с микрофона прямо в UI",
       "priority": "P1",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F08-gradio-ui"],
       "spec": "См. TZ-v2-improvements.md §F16. gr.Audio(sources=['microphone'], type='filepath'). Приоритет drop zone, если оба заполнены.",
       "verification": "E2E: записать 30 сек → транскрипт получен.",
-      "evidence": null
+      "evidence": "app.py: mic_in = gr.Audio(sources=['microphone'], type='filepath'). _run_pipeline принимает mic_file. Логика: drop zone приоритет; mic_file используется только если audio_file пуст. Warning в логе при двойном заполнении. 97/97 pytest. E2E (записать в браузере) — ждёт прогона."
     },
     {
       "id": "F17-audio-player",
