@@ -187,7 +187,8 @@ def transcribe(
     Raises:
         FileNotFoundError если файла нет.
         ValueError если model_size не из SUPPORTED_MODELS.
-        RuntimeError если mlx-whisper упал на загрузке/обработке.
+        RuntimeError если backend упал на загрузке модели или обработке чанка.
+            Текст ошибки включает имя backend ('mlx' / 'faster-whisper') для отладки.
     """
     p = Path(audio_path)
     if not p.exists():
@@ -278,7 +279,16 @@ def transcribe(
         # критично: WhisperModel() весит 1-3 ГБ, повторять на каждый чанк было бы дорого.
         # Для MLX open_model() возвращает строку и почти бесплатен, но интерфейс общий.
         progress("backend_open", start_chunk / max(chunks_total, 1), f"Загружаю модель {model_size}…")
-        model_handle = backend.open_model(model_size)
+        try:
+            model_handle = backend.open_model(model_size)
+        except Exception as e:
+            # Первая загрузка модели качает 0.5-3 ГБ с HuggingFace. Сеть упала,
+            # диск кончился, HF down — всё через эту точку. Превращаем в RuntimeError
+            # с подсказкой, иначе сырой huggingface_hub traceback пугает пользователя.
+            raise RuntimeError(
+                f"Не удалось загрузить модель {model_size} ({backend_name}): {e}. "
+                "Проверь интернет, место на диске (~3 ГБ для large-v3) и доступность HuggingFace."
+            ) from e
 
         nonlocal detected_lang
         segs_buf = list(accumulated)  # для дампа в cache

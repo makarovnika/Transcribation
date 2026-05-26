@@ -93,7 +93,63 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[ok] зависимости поставлены"
 
-# --- 6. Smoke pytest ---
+# --- 6. CUDA detection (для GPU-ускорения) ---
+# По умолчанию pip ставит CPU-сборку torch на Windows. Если есть NVIDIA GPU,
+# нужно переустановить torch с CUDA-индекса. Делаем это автоматически — иначе
+# юзер с RTX «молча» получит CPU и удивится почему медленно.
+$hasNvidia = $false
+if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+    Write-Host "[..] nvidia-smi найден, проверяю CUDA capability…"
+    $smiOut = & nvidia-smi 2>&1 | Out-String
+    if ($smiOut -match "CUDA Version: (\d+)\.(\d+)") {
+        $cudaMajor = [int]$Matches[1]
+        Write-Host "[ok] NVIDIA driver CUDA: $($Matches[0])"
+        $hasNvidia = $true
+        # cu121 требует driver ≥ 530.x (CUDA 12.1+). cu118 — driver ≥ 450 (CUDA 11.8).
+        if ($cudaMajor -ge 12) {
+            $cudaWheelIdx = "https://download.pytorch.org/whl/cu121"
+            $cudaTag = "cu121"
+        } else {
+            $cudaWheelIdx = "https://download.pytorch.org/whl/cu118"
+            $cudaTag = "cu118"
+        }
+    } else {
+        Write-Host "[warn] не смог распарсить CUDA version из nvidia-smi"
+    }
+} else {
+    Write-Host "[..] nvidia-smi не найден — GPU нет или драйверы не установлены. Остаёмся на CPU."
+}
+
+# Проверим уже-установленный torch — может быть это CPU-сборка, нужно переставить.
+$torchInfo = & $venvPython -c "import torch; print(torch.__version__); print(torch.cuda.is_available())" 2>&1
+$torchVer, $cudaAvailable = $torchInfo -split "`n"
+Write-Host "[..] torch=$torchVer, cuda.is_available()=$cudaAvailable"
+
+if ($hasNvidia -and $cudaAvailable -ne "True") {
+    Write-Host ""
+    Write-Host "[!] У тебя есть NVIDIA GPU, но torch установлен в CPU-режиме."
+    Write-Host "    Чтобы транскрибация шла на GPU, нужно переставить torch с CUDA-индекса ($cudaTag)."
+    $answer = Read-Host "Поставить CUDA-сборку torch сейчас? Это снова потянет ~2 ГБ. [Y/n]"
+    if ($answer -ne "n" -and $answer -ne "N") {
+        Write-Host "[..] ставлю torch+torchaudio для $cudaTag"
+        & $venvPython -m pip install --upgrade --force-reinstall torch torchaudio --index-url $cudaWheelIdx
+        if ($LASTEXITCODE -eq 0) {
+            $check = & $venvPython -c "import torch; print(torch.cuda.is_available())"
+            if ($check -eq "True") {
+                Write-Host "[ok] torch теперь видит CUDA"
+            } else {
+                Write-Host "[warn] torch установлен, но cuda.is_available()=False."
+                Write-Host "       Проверь nvidia-smi → Driver Version ≥ 530.x для cu121."
+            }
+        } else {
+            Write-Host "[warn] установка CUDA-сборки упала. Останешься на CPU."
+        }
+    } else {
+        Write-Host "[skip] остаёшься на CPU. Поставить позже: pip install --upgrade --force-reinstall torch torchaudio --index-url $cudaWheelIdx"
+    }
+}
+
+# --- 7. Smoke pytest ---
 Write-Host "[..] прогоняю smoke-тесты"
 & $venvPython -m pytest tests/ -q --no-header
 if ($LASTEXITCODE -ne 0) {

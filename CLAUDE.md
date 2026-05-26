@@ -15,13 +15,15 @@
 ## Контекст проекта
 
 Локальное оффлайн-приложение для транскрибации аудио в текст с разделением
-по спикерам и генерацией субтитров. Работает на Mac с Apple Silicon, без
-отправки данных в облако.
+по спикерам и генерацией субтитров. Работает на macOS (Apple Silicon) и
+Windows (включая NVIDIA GPU). Никаких облачных API.
 
 **Ключевые компоненты:**
-- `faster-whisper` (CTranslate2) — транскрибация. На Apple Silicon работает на
-  CPU + int8 (CTranslate2 пока не поддерживает MPS).
-- `pyannote.audio` — диаризация спикеров. Поддерживает MPS.
+- **Whisper backend — выбирается в рантайме** (см. `src/whisper_backends/`):
+  - `mlx-whisper` — на Apple Silicon (нативный Metal, ~18× realtime на large-v3)
+  - `faster-whisper` — на Windows/Linux (CUDA + float16 если есть GPU, иначе CPU + int8)
+  - Переключатель: env `TRANSCRIBER_BACKEND=mlx|faster-whisper`
+- `pyannote.audio` 3.3+ — диаризация. Поддерживает cuda > mps > cpu (см. `src/device.py`).
 - `Gradio` — простой локальный веб-UI.
 - `ffmpeg` — конвертация видео/аудио форматов.
 
@@ -76,20 +78,34 @@ transcriber/
 ├── app.py
 ├── src/
 │   ├── __init__.py
-│   ├── device.py
+│   ├── device.py             ← выбор backend и устройства
 │   ├── audio_utils.py
-│   ├── transcription.py
-│   ├── diarization.py
+│   ├── transcription.py      ← чанкинг, partial-cache, resume
+│   ├── whisper_backends/     ← cross-platform фасад
+│   │   ├── __init__.py       ← factory get_backend()
+│   │   ├── mlx_backend.py    ← Apple Silicon (Metal)
+│   │   └── fw_backend.py     ← Windows/Linux (CUDA/CPU)
+│   ├── diarization.py        ← pyannote 3.3+, diar-cache
 │   ├── alignment.py
 │   ├── exporters.py
 │   └── config.py
+├── bin/
+│   ├── svc-*.sh                              ← Mac launchd сервис
+│   ├── com.muraveika.transcriber.plist.template
+│   └── windows/                              ← Windows Task Scheduler сервис
+│       ├── setup.ps1                         ← venv + deps + CUDA auto-detect
+│       ├── install-service.ps1
+│       ├── _runner.ps1                       ← wrapper для редиректа stdout
+│       └── restart/uninstall/status/logs.ps1
 ├── tests/
 │   ├── conftest.py
 │   ├── test_alignment.py
+│   ├── test_device.py
 │   ├── test_exporters.py
 │   └── fixtures/sample_30s.wav
-├── cache/        # gitignored
-└── outputs/      # gitignored
+├── cache/        # gitignored (transcribe partial + diar cache)
+├── outputs/      # gitignored
+└── logs/         # gitignored (логи сервиса)
 ```
 
 ---
@@ -129,11 +145,16 @@ transcriber/
 
 ## Подводные камни (читать перед работой)
 
-- **faster-whisper на MPS НЕ работает** (CTranslate2 не поддерживает Metal). Использовать `device="cpu"`, `compute_type="int8"`. На M-чипах это всё равно быстро благодаря Accelerate.
-- **pyannote/speaker-diarization-3.1** требует принятия условий на HuggingFace под аккаунтом. Без этого `pipeline.from_pretrained` упадёт с 401/403.
-- **Память на длинных файлах:** pyannote держит файл целиком в RAM (~3 ГБ на час 16kHz mono). Для 3-часового файла надо ≥8 ГБ свободной памяти.
+- **pyannote 3.3+ переименовала `use_auth_token` → `token`** при `Pipeline.from_pretrained`. В diarization.py мы пробуем сначала новый, потом старый параметр для совместимости.
+- **pyannote возвращает `DiarizeOutput`**, а не `Annotation`. Аннотация — внутри `.speaker_diarization`. Берём через `getattr(annotation, 'speaker_diarization', annotation)` (back-compat со старыми версиями).
+- **pyannote/speaker-diarization-3.1 требует accept трёх gated моделей** на HuggingFace под аккаунтом:
+  - `pyannote/speaker-diarization-3.1`
+  - `pyannote/segmentation-3.0`
+  - `pyannote/speaker-diarization-community-1`  ← это часто забывают, оно даёт 403
+- **Память на длинных файлах:** pyannote держит файл целиком в RAM (~3 ГБ на час 16kHz mono). Для 3-часового файла надо ≥8 ГБ свободной памяти. На 8-ГБ Mac мы выгружаем MLX-кэш между transcribe и diarize (`mlx.metal.clear_cache()` в app.py).
+- **MLX недоступен вне Apple Silicon** — на Windows/Linux код автоматически уходит на `faster-whisper`. Если на Mac arm64 mlx-whisper не установлен (например после ручного pip install), `device.get_whisper_backend()` тихо вернёт `faster-whisper` (CPU+int8) — медленно. Проверить: `python -c "from src.device import get_device_info; print(get_device_info())"`.
+- **CUDA torch на Windows ставится отдельно.** Стандартный `pip install torch` тянет CPU-сборку. Для GPU нужен индекс `--index-url https://download.pytorch.org/whl/cu121`. `setup.ps1` детектит `nvidia-smi` и предлагает поставить автоматически.
 - **SRT/VTT таймкоды:** формат разный (`,` vs `.` в миллисекундах). Не путать.
-- **Gradio + большие файлы:** надо поднять `gr.Blocks(... )` без ограничения по размеру загрузки.
 
 ---
 

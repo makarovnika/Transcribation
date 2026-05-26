@@ -155,13 +155,29 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 
 По умолчанию `torch` ставится в CPU-сборке. Чтобы транскрибация шла на NVIDIA GPU:
 
+**Сначала проверь драйверы NVIDIA** — `cu121` требует Driver Version ≥ 530:
+
+```powershell
+nvidia-smi
+```
+
+В правом верхнем углу должно быть `CUDA Version: 12.1` или выше. Если ниже
+12.x — используй индекс `cu118` (CUDA 11.8, требует driver ≥ 450). Если
+драйвер старее — обнови через GeForce Experience.
+
+`setup.ps1` детектит `nvidia-smi` и предлагает поставить CUDA-сборку автоматически —
+если согласишься, шаги ниже делать не надо. Если делал вручную:
+
 ```powershell
 .\.venv\Scripts\activate
 
-# CUDA 12.x — индексы на pytorch.org/get-started:
+# CUDA 12.x (driver ≥ 530):
 pip install --upgrade --force-reinstall `
   torch torchaudio `
   --index-url https://download.pytorch.org/whl/cu121
+
+# или CUDA 11.8 (driver ≥ 450):
+# pip install --upgrade --force-reinstall torch torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
 Проверь:
@@ -321,11 +337,22 @@ Plist рендерится из шаблона `bin/com.muraveika.transcriber.pl
 
 ## Подводные камни
 
-### 1. faster-whisper не работает на MPS
+### 1. Whisper-бэкенды и устройства
 
-CTranslate2 (бэкенд faster-whisper) пока не поддерживает Metal. Поэтому
-транскрибация идёт на CPU + int8. На Apple Silicon это всё равно быстро
-благодаря Accelerate framework — не паникуй, что «не на GPU».
+Код **автоматически** выбирает бэкенд (см. `src/device.py`):
+- **macOS arm64** → `mlx-whisper` (Metal, нативно быстро)
+- **Windows/Linux + NVIDIA** → `faster-whisper` + CUDA (если установлен torch с CUDA)
+- **Windows/Linux без GPU** → `faster-whisper` + CPU+int8 (медленнее, но работает)
+
+CTranslate2 (бэкенд faster-whisper) не поддерживает Metal, поэтому на Mac мы
+используем именно MLX. На Mac без mlx-whisper в venv код тихо уйдёт на
+faster-whisper CPU+int8 — медленно. Проверить:
+
+```bash
+.venv/bin/python -c "from src.device import get_device_info; print(get_device_info())"
+```
+
+Принудительно переключить: `export TRANSCRIBER_BACKEND=mlx` или `faster-whisper`.
 
 ### 2. pyannote 401/403 на первом запуске
 

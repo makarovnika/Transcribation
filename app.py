@@ -200,15 +200,21 @@ def _run_pipeline(
         # освобождение требует subprocess (см. задача #19), но даже clear_cache +
         # gc.collect снимает несколько сотен МБ — для 8 ГБ это спасает.
         if do_diarize:
-            del ws_iter  # закроет генератор и его closure (модель mlx)
+            del ws_iter  # закроет генератор и его closure (модель Whisper)
             import gc
             gc.collect()
-            try:
-                import mlx.core as mx  # type: ignore[import-not-found]
-                mx.metal.clear_cache()
-                log.info("freed mlx Metal cache before diarization")
-            except Exception as e:
-                log.warning("could not clear mlx cache: %s", e)
+            # mlx.metal — только на Apple Silicon. На Windows/Linux пропускаем тихо,
+            # чтобы не засорять лог warning'ом на каждом запросе. faster-whisper
+            # держит модель в CUDA/CPU памяти, и она освобождается при del выше.
+            if sys.platform == "darwin":
+                try:
+                    import mlx.core as mx  # type: ignore[import-not-found]
+                    mx.metal.clear_cache()
+                    log.info("freed mlx Metal cache before diarization")
+                except ImportError:
+                    pass  # MLX не установлен — значит fallback на faster-whisper, нечего чистить
+                except Exception as e:
+                    log.warning("could not clear mlx cache: %s", e)
 
         # Диаризация (опционально)
         sp_segments: list[diarization.SpeakerSegment] = []
