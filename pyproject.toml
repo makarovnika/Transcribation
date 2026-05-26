@@ -1,14 +1,17 @@
 [project]
 name = "transcriber"
-version = "0.1.0"
-description = "Локальный сервис транскрибации аудио с диаризацией (Apple Silicon, offline)"
+version = "0.2.0"
+description = "Локальный транскрибатор аудио с диаризацией. macOS (MLX) + Windows/Linux (faster-whisper/CUDA)."
 requires-python = ">=3.10,<3.14"
 readme = "README.md"
 
-# Зависимости. Под Apple Silicon — mlx-whisper (Metal-ускорение, в 5-8× быстрее
-# faster-whisper на CPU+int8 для long-form). На других платформах фолбэка нет:
-# проект изначально только под macOS arm64 (см. ТЗ §2).
+# Кросс-платформенные зависимости.
+# - `faster-whisper` есть всегда (Windows/Linux основной бэкенд; на Mac — фолбэк).
+# - `mlx-whisper` только на Apple Silicon — он быстрее faster-whisper на M-чипах
+#   в 5–8 раз для long-form. На Windows/Linux MLX не существует.
+# Выбор бэкенда в рантайме делает src/device.py (см. get_whisper_backend()).
 dependencies = [
+    "faster-whisper>=1.0.3",
     "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "pyannote.audio>=3.3.0",
     "gradio>=4.40.0",

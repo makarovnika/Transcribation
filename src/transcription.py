@@ -1,22 +1,22 @@
-"""Транскрибация через mlx-whisper с чанкингом и промежуточным кэшем.
+"""Транскрибация с чанкингом и промежуточным кэшем — кросс-платформенно.
 
 Почему так:
-- mlx-whisper — Apple MLX порт Whisper с нативным Metal-ускорением. На M-чипах
-  даёт ~5-8× против faster-whisper CPU+int8 для long-form (см. CLAUDE.md).
-- mlx-whisper.transcribe() блокирующий и возвращает весь результат разом —
-  для 3-часового файла это значит «час без feedback». Поэтому мы режем wav
-  на 10-минутные чанки сами и yield-им сегменты по мере готовности чанка.
+- Whisper-бэкенд абстрагирован: на Apple Silicon — MLX (Metal, 5-8× быстрее),
+  на Windows/Linux — faster-whisper (CUDA если есть, иначе CPU+int8).
+  Выбор делает src/whisper_backends/__init__.py через device.get_whisper_backend().
+- Длинный файл (3+ часа) на любом бэкенде блокирующий и не выдаёт прогресс.
+  Поэтому мы режем wav на 10-минутные чанки сами и yield-им сегменты по мере
+  готовности чанка.
 - После каждого чанка сохраняем накопленные сегменты в cache/<hash>.partial.json.
   Если процесс упадёт на середине — следующий запуск того же файла поднимется
   с последнего успешного чанка (см. ТЗ §3.5).
 
-Параметры качества (ТЗ §3.3):
+Параметры качества (ТЗ §3.3) — общие для бэкендов:
 - condition_on_previous_text=False — критично против галлюцинаций на длинных
   файлах (Whisper иначе застревает в повторяющихся фразах).
-- temperature fallback по умолчанию (0.0..1.0) — оставляем дефолт mlx-whisper.
-- beam_size — у openai/mlx Whisper нет прямого параметра, beam управляется через
-  внутренние DecodingOptions. Для long-form по умолчанию greedy decoding
-  (быстрее, на длинных файлах разница в качестве микроскопическая).
+- VAD-фильтр — у faster-whisper включён через vad_filter=True; mlx-whisper
+  делает свой VAD внутри.
+- beam_size=5 (только faster-whisper, у mlx это управляется через DecodingOptions).
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .device import get_whisper_backend  # noqa: F401  # для будущих ветвлений
+from . import whisper_backends
 
 log = logging.getLogger("transcriber.transcription")
 
@@ -48,15 +48,10 @@ SUPPORTED_MODELS: tuple[WhisperModelName, ...] = (
 )
 DEFAULT_MODEL: WhisperModelName = "large-v3"
 
-# MLX-конвертированные веса лежат в mlx-community на HuggingFace.
-# Маппинг — единственное место, которое менять при появлении новых моделей (turbo и т.п.).
-_MLX_REPO_BY_MODEL: dict[str, str] = {
-    "tiny":     "mlx-community/whisper-tiny-mlx",
-    "base":     "mlx-community/whisper-base-mlx",
-    "small":    "mlx-community/whisper-small-mlx",
-    "medium":   "mlx-community/whisper-medium-mlx",
-    "large-v3": "mlx-community/whisper-large-v3-mlx",
-}
+# Маппинг размеров → имён моделей для каждого бэкенда лежит в самих модулях
+# whisper_backends/mlx_backend.py и whisper_backends/fw_backend.py.
+# faster-whisper понимает короткие имена ('tiny', 'small', ...) и сам тянет
+# с HF — никакой подмены тут не нужно.
 
 
 @dataclass(frozen=True)
@@ -259,10 +254,11 @@ def transcribe(
                     progress("transcribe_done", 1.0, "Готово (из кэша)")
                     return iter(accumulated), meta
 
-    repo = _MLX_REPO_BY_MODEL[model_size]
+    backend = whisper_backends.get_backend()
+    backend_name = whisper_backends.get_backend_name()
     log.info(
-        "mlx repo=%s chunks=%d (start=%d) chunk_sec=%d dur=%.1fs",
-        repo, chunks_total, start_chunk, chunk_seconds, duration_sec,
+        "backend=%s model=%s chunks=%d (start=%d) chunk_sec=%d dur=%.1fs",
+        backend_name, model_size, chunks_total, start_chunk, chunk_seconds, duration_sec,
     )
 
     meta = TranscriptionMeta(
@@ -278,8 +274,11 @@ def transcribe(
         for s in accumulated:
             yield s
 
-        # Ленивый импорт mlx_whisper — потяжелее всего, не делаем при импорте модуля.
-        import mlx_whisper
+        # Загрузка модели — один раз перед циклом. Для faster-whisper это
+        # критично: WhisperModel() весит 1-3 ГБ, повторять на каждый чанк было бы дорого.
+        # Для MLX open_model() возвращает строку и почти бесплатен, но интерфейс общий.
+        progress("backend_open", start_chunk / max(chunks_total, 1), f"Загружаю модель {model_size}…")
+        model_handle = backend.open_model(model_size)
 
         nonlocal detected_lang
         segs_buf = list(accumulated)  # для дампа в cache
@@ -306,26 +305,22 @@ def transcribe(
             progress(
                 "transcribe_chunk",
                 idx / chunks_total,
-                f"Чанк {idx + 1}/{chunks_total} (MLX)…",
+                f"Чанк {idx + 1}/{chunks_total} ({backend_name})…",
             )
 
             try:
-                result = mlx_whisper.transcribe(
-                    chunk_arr,
-                    path_or_hf_repo=repo,
-                    language=language,
-                    condition_on_previous_text=False,  # см. docstring модуля
-                    verbose=None,                       # без печати в stdout
+                seg_dicts, lang_from_chunk = backend.transcribe_chunk(
+                    model_handle, chunk_arr, language,
                 )
             except Exception as e:
                 raise RuntimeError(
-                    f"mlx-whisper упал на чанке {idx + 1}/{chunks_total}: {e}"
+                    f"{backend_name} упал на чанке {idx + 1}/{chunks_total}: {e}"
                 ) from e
 
-            if detected_lang is None:
-                detected_lang = result.get("language")
+            if detected_lang is None and lang_from_chunk:
+                detected_lang = lang_from_chunk
 
-            for seg in result.get("segments", []):
+            for seg in seg_dicts:
                 ours = Segment(
                     start=float(seg["start"]) + offset_sec,
                     end=float(seg["end"]) + offset_sec,

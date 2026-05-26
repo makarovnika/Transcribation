@@ -1,16 +1,18 @@
-"""Автоопределение устройства для инференса.
+"""Автоопределение устройства и бэкенда для инференса.
 
-Контекст по платформе:
-- На Apple Silicon (M1+) есть Metal Performance Shaders.
-- Транскрибация — mlx-whisper (Apple MLX, нативный Metal). Параметры precision
-  и компиляции под Metal управляются внутри MLX.
-- Диаризация — pyannote.audio. Поддерживает MPS через PyTorch.
+Платформенная матрица:
+- Apple Silicon (M1+):  whisper=mlx (Metal),    pyannote=mps
+- Windows + NVIDIA:     whisper=faster-whisper, pyannote=cuda (если установлен torch с CUDA)
+- Windows без NVIDIA:   whisper=faster-whisper, pyannote=cpu
+- Linux + NVIDIA:       whisper=faster-whisper, pyannote=cuda
+- CPU only (любая ОС):  whisper=faster-whisper (int8), pyannote=cpu
 
-Для не-arm64 macOS этот проект не предназначен (см. ТЗ §2 и pyproject.toml).
+Переключить бэкенд принудительно: env TRANSCRIBER_BACKEND=mlx|faster-whisper.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 
@@ -18,14 +20,15 @@ from dataclasses import dataclass
 class DeviceInfo:
     """Снимок состояния устройств для отображения в UI/логах."""
 
-    pyannote_device: str   # 'mps' | 'cpu'
-    whisper_backend: str   # 'mlx'
+    pyannote_device: str   # 'mps' | 'cuda' | 'cpu'
+    whisper_backend: str   # 'mlx' | 'faster-whisper'
     mps_available: bool
+    cuda_available: bool
     note: str              # человекочитаемое пояснение
 
 
 def _is_mps_available() -> bool:
-    """True, если PyTorch видит MPS-бэкенд."""
+    """True, если PyTorch видит Apple MPS-бэкенд."""
     try:
         import torch
     except ImportError:
@@ -37,8 +40,17 @@ def _is_mps_available() -> bool:
     )
 
 
+def _is_cuda_available() -> bool:
+    """True, если PyTorch видит CUDA (NVIDIA GPU)."""
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except ImportError:
+        return False
+
+
 def _is_mlx_available() -> bool:
-    """True если mlx-whisper установлен (а значит и mlx, и Metal-бэкенд)."""
+    """True если mlx-whisper установлен (только Apple Silicon)."""
     try:
         import mlx_whisper  # noqa: F401
     except ImportError:
@@ -47,39 +59,65 @@ def _is_mlx_available() -> bool:
 
 
 def get_pyannote_device() -> str:
-    """Куда грузить pyannote: 'mps' если доступен, иначе 'cpu'."""
-    return "mps" if _is_mps_available() else "cpu"
+    """Куда грузить pyannote: cuda > mps > cpu.
+
+    pyannote.audio поддерживает все три. CUDA быстрее MPS, MPS быстрее CPU.
+    """
+    if _is_cuda_available():
+        return "cuda"
+    if _is_mps_available():
+        return "mps"
+    return "cpu"
 
 
 def get_whisper_backend() -> str:
-    """Какой бэкенд транскрибации использовать.
+    """Какой бэкенд транскрибации.
 
-    Возвращает 'mlx' — единственный поддерживаемый сейчас (см. модульный docstring).
-    Функция оставлена для будущей возможности добавить fallback (например,
-    openai-whisper на CPU для не-arm64).
+    Приоритет:
+      1. ENV TRANSCRIBER_BACKEND — для отладки и принудительного режима.
+      2. MLX если доступен (только Apple Silicon).
+      3. Иначе faster-whisper (cross-platform, при наличии CUDA — на GPU).
     """
-    return "mlx"
+    forced = os.environ.get("TRANSCRIBER_BACKEND", "").strip().lower()
+    if forced == "mlx":
+        return "mlx"
+    if forced in {"faster-whisper", "faster_whisper", "fw"}:
+        return "faster-whisper"
+
+    if _is_mlx_available():
+        return "mlx"
+    return "faster-whisper"
 
 
 def get_device_info() -> DeviceInfo:
     """Собирает полный снимок выбранных устройств. Удобно для логов и UI."""
     mps = _is_mps_available()
+    cuda = _is_cuda_available()
     mlx_ok = _is_mlx_available()
+    backend = get_whisper_backend()
     pyannote_dev = get_pyannote_device()
 
-    if mlx_ok and mps:
+    if backend == "mlx" and mps:
         note = "MLX (Metal) для транскрибации, pyannote на MPS — оптимум для Apple Silicon."
-    elif mlx_ok and not mps:
-        note = "MLX (Metal) есть, но MPS PyTorch не доступен — pyannote пойдёт на CPU."
+    elif backend == "mlx" and not mps:
+        note = "MLX установлен, но MPS не доступен — pyannote пойдёт на CPU."
+    elif backend == "faster-whisper" and cuda:
+        note = "faster-whisper на CUDA + pyannote на CUDA — оптимум для Windows/Linux с NVIDIA."
+    elif backend == "faster-whisper" and mps:
+        # Странный случай: Mac arm64 с принудительным TRANSCRIBER_BACKEND=faster-whisper.
+        note = "faster-whisper в режиме CPU+int8 (CTranslate2 не поддерживает Metal). pyannote на MPS."
+    elif backend == "faster-whisper":
+        note = "faster-whisper на CPU+int8. Медленно. Поставь CUDA-сборку torch для ускорения."
     else:
-        note = (
-            "mlx-whisper не установлен. Установи: "
-            "uv pip install -e '.[dev]'"
-        )
+        note = "Состояние неизвестно — посмотри логи."
+
+    if not mlx_ok and not cuda and not mps:
+        note += " Внимание: без MLX/CUDA/MPS обработка длинных файлов будет очень медленной."
 
     return DeviceInfo(
         pyannote_device=pyannote_dev,
-        whisper_backend="mlx",
+        whisper_backend=backend,
         mps_available=mps,
+        cuda_available=cuda,
         note=note,
     )

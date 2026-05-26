@@ -1,10 +1,18 @@
 # Локальный транскрибатор (offline)
 
 Перевод аудио/видео в текст с разделением по спикерам и субтитрами.
-Работает **полностью локально** на Mac с Apple Silicon (M1/M2/M3/M4).
-Никаких облачных API.
+Работает **полностью локально**. Никаких облачных API.
 
-Стек: `faster-whisper` (CTranslate2) + `pyannote.audio` 3.1 + `Gradio`.
+| Платформа | Whisper бэкенд | Скорость |
+|-----------|---------------|----------|
+| macOS (Apple Silicon M1+) | `mlx-whisper` (Metal) | большая модель ~18× realtime |
+| Windows + NVIDIA GPU | `faster-whisper` + CUDA | ещё быстрее (на RTX 3050+ — летает) |
+| Windows / Linux без GPU | `faster-whisper` + CPU+int8 | приемлемо для small/medium |
+
+Диаризация (разделение по спикерам) — `pyannote.audio` 3.x, всегда через PyTorch.
+
+См. также разделы [«Установка на Windows»](#установка-на-windows) и
+[«Перенос на другой Mac»](#перенос-на-другой-mac).
 
 ---
 
@@ -93,6 +101,125 @@ UI:
 - Включи диаризацию, если нужны метки спикеров.
 - Жми «Транскрибировать».
 - Когда готово — скачай результат в 5 форматах: `.txt`, `.srt`, `.vtt`, `.json`, `.md`.
+
+---
+
+## Установка на Windows
+
+Тестировано: Windows 10/11 + Python 3.10–3.13. NVIDIA GPU **не обязательна**,
+но с ней транскрибация быстрее в разы (CUDA + float16). На RTX 3050 Ti
+(4 ГБ VRAM) `large-v3` помещается с запасом.
+
+### 1. Системные зависимости
+
+Открой PowerShell **с правами администратора** и поставь через winget:
+
+```powershell
+winget install Gyan.FFmpeg
+winget install Python.Python.3.12
+winget install --id=Git.Git
+```
+
+Перезайди в PowerShell после установки (чтобы PATH подхватился). Проверь:
+
+```powershell
+ffmpeg -version
+python --version    # 3.10..3.13
+git --version
+```
+
+### 2. Клонировать репозиторий
+
+```powershell
+cd $HOME
+git clone https://github.com/makarovnika/Transcribation.git transcriber
+cd transcriber
+```
+
+### 3. Запустить установщик окружения
+
+```powershell
+# Один раз — разрешить скрипты в этой сессии PowerShell.
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+
+.\bin\windows\setup.ps1
+```
+
+Скрипт сам:
+- проверит ffmpeg / Python / uv,
+- создаст `.venv`,
+- поставит зависимости (`faster-whisper`, `pyannote.audio`, `gradio`, `torch`, …),
+- прогонит smoke pytest.
+
+### 4. (Опционально) CUDA для GPU-ускорения
+
+По умолчанию `torch` ставится в CPU-сборке. Чтобы транскрибация шла на NVIDIA GPU:
+
+```powershell
+.\.venv\Scripts\activate
+
+# CUDA 12.x — индексы на pytorch.org/get-started:
+pip install --upgrade --force-reinstall `
+  torch torchaudio `
+  --index-url https://download.pytorch.org/whl/cu121
+```
+
+Проверь:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+```
+
+Должно вывести `CUDA: True NVIDIA GeForce RTX 3050 Ti` (или другую модель GPU).
+
+### 5. HuggingFace токен
+
+Точно так же как на Mac — открой UI, введи токен в поле «HF Token», поставь
+галку «Запомнить». Сохранится в `%USERPROFILE%\.config\transcriber\config.json`.
+
+Условия трёх gated моделей принимаются один раз на HF-аккаунт (см. раздел
+«Получение HF-токена» выше).
+
+### 6. Запуск
+
+**Вручную** (двойной клик на `bin\windows\run.bat` или из PowerShell):
+
+```powershell
+.\.venv\Scripts\python.exe -u app.py
+```
+
+Откроется `http://127.0.0.1:7860`.
+
+**Как фоновый сервис** (Task Scheduler, аналог launchd):
+
+```powershell
+.\bin\windows\install-service.ps1    # установить и запустить
+.\bin\windows\status.ps1             # проверить статус
+.\bin\windows\logs.ps1               # tail логов
+.\bin\windows\restart-service.ps1    # перезапустить после правки кода
+.\bin\windows\uninstall-service.ps1  # снять
+```
+
+После `install-service.ps1` сервис запускается при логине пользователя,
+перезапускается при крахе, логи в `logs\transcriber.{out,err}.log`.
+
+### Подводные камни на Windows
+
+1. **`Set-ExecutionPolicy`** — Windows по умолчанию запрещает PS-скрипты.
+   `Scope Process` ограничивает разрешение только текущей сессией терминала.
+
+2. **CUDA / torch несовместимости** — если поставил torch для одной версии CUDA,
+   а драйверы NVIDIA от другой — может молча упасть на `torch.cuda.is_available()=False`.
+   Проверь версию CUDA: `nvidia-smi` → правая верхняя cell `CUDA Version`.
+   Должна быть ≥ той, что в индексе torch (`cu121` = CUDA 12.1+).
+
+3. **Длинные пути / кириллица** — Windows исторически не любит пути > 260 символов
+   и кириллицу в имени пользователя. Если падает прямо на старте — попробуй
+   склонировать репо в `C:\transcriber\`.
+
+4. **Task Scheduler не запускается** — Windows блокирует sleep-режим во время
+   работы задачи. Если ноут спит — UI недоступен, что нормально. Просыпается
+   → задача жива.
 
 ---
 
