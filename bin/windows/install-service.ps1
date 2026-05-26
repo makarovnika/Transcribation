@@ -43,11 +43,14 @@ if ($existing) {
 
 # Прибить любой работающий python app.py — иначе будут драться за порт 7860.
 # Берём всё что слушает 7860, не только наш venv (мог быть запущен из другого чекаута).
+# ВАЖНО: НЕ называть переменную $pid — это automatic variable в PowerShell
+# (= PID самого PowerShell-процесса). Под Set-StrictMode присваивание упадёт
+# с PSInvalidCastException. Поэтому здесь $procId.
 $pidsOnPort = (Get-NetTCPConnection -LocalPort 7860 -State Listen -ErrorAction SilentlyContinue).OwningProcess
-foreach ($pid in $pidsOnPort) {
-    if ($pid) {
-        Write-Host "[..] прибиваю процесс PID=$pid (слушает порт 7860)"
-        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+foreach ($procId in $pidsOnPort) {
+    if ($procId) {
+        Write-Host "[..] прибиваю процесс PID=$procId (слушает порт 7860)"
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
     }
 }
 
