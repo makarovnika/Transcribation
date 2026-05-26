@@ -799,19 +799,15 @@ def build_ui() -> gr.Blocks:
     )
     token_line = _token_status_line()
 
-    # F13: индиго-тема, тёмный фон, шрифт Inter (близкий к macOS SF Pro).
-    # Если GoogleFont не загрузится (оффлайн) — Gradio мягко откатится на дефолт.
+    # F13: светлая тема Soft с акцентом indigo. Раньше пробовал тёмную — на
+    # некоторых браузерах/шрифтах текст плохо читался. Светлая Soft — дефолт
+    # Gradio, контраст гарантирован.
+    # Если хочешь тёмную обратно — см. git history (commit c5c4144) или
+    # переключи через env GRADIO_THEME_DARK=1 (не реализовано, но легко).
     try:
         theme = gr.themes.Soft(
             primary_hue="indigo",
             neutral_hue="slate",
-            font=gr.themes.GoogleFont("Inter"),
-        ).set(
-            body_background_fill="*neutral_950",
-            background_fill_primary="*neutral_900",
-            block_background_fill="*neutral_900",
-            block_border_color="*neutral_800",
-            button_primary_background_fill="*primary_600",
         )
     except Exception as e:
         log.warning("custom theme failed, falling back to default: %s", e)
