@@ -456,12 +456,18 @@ def _run_pipeline(
         # освобождение требует subprocess (см. задача #19), но даже clear_cache +
         # gc.collect снимает несколько сотен МБ — для 8 ГБ это спасает.
         if do_diarize:
-            del ws_iter  # закроет генератор и его closure (модель Whisper)
+            # ws_iter существует только в in-process ветке транскрибации
+            # (через transcription.transcribe). Если шли через subprocess —
+            # генератор уже умер вместе с subprocess'ом, чистить нечего.
+            if "ws_iter" in locals():
+                del ws_iter  # закроет генератор и его closure (модель Whisper)
             import gc
             gc.collect()
             # mlx.metal — только на Apple Silicon. На Windows/Linux пропускаем тихо,
             # чтобы не засорять лог warning'ом на каждом запросе. faster-whisper
             # держит модель в CUDA/CPU памяти, и она освобождается при del выше.
+            # При subprocess-варианте mx уже не в этом процессе — clear_cache не нужен,
+            # но всё равно вызовем (no-op если mlx не импортирован в основном процессе).
             if sys.platform == "darwin":
                 try:
                     import mlx.core as mx  # type: ignore[import-not-found]
