@@ -361,6 +361,37 @@ def _run_pipeline(
         h, m = divmod(m, 60)
         return f"~{h}ч {m:02d}м"
 
+    # F13: 4-этапная прогресс-строка ("✓ Подготовка · ● Whisper · ○ Диаризация · ○ Экспорт").
+    # Текущий этап = ● (точка), пройденные = ✓, будущие = ○. Эта строка пишется
+    # в начало desc прогресс-бара перед label/note/ETA — чтобы пользователь видел
+    # «где мы сейчас» в общей цепочке.
+    STAGE_NAMES = ["Подготовка", "Whisper", "Диаризация", "Экспорт"]
+
+    def _stage_index_for(value: float) -> int:
+        """По общей доле прогресса определяет текущий этап (0..3).
+
+        Границы соответствуют диапазонам, которые мы передаём в _make_progress:
+        prepare 0..0.05, transcribe 0.05..0.7, diarize 0.7..0.95, export 0.95..1.0.
+        """
+        if value < 0.05:
+            return 0
+        if value < 0.7:
+            return 1
+        if value < 0.95:
+            return 2
+        return 3
+
+    def _stages_line(current: int) -> str:
+        parts: list[str] = []
+        for i, name in enumerate(STAGE_NAMES):
+            if i < current:
+                parts.append(f"✓ {name}")
+            elif i == current:
+                parts.append(f"● {name}")
+            else:
+                parts.append(f"○ {name}")
+        return " · ".join(parts)
+
     def _make_progress(stage_lo: float, stage_hi: float, label: str):
         def cb(stage: str, fraction: float, note: str) -> None:
             value = stage_lo + (stage_hi - stage_lo) * fraction
@@ -372,7 +403,8 @@ def _run_pipeline(
                 eta_suffix = f" · осталось {eta_str}" if eta_str else ""
             else:
                 eta_suffix = ""
-            progress(value, desc=f"{label}: {note}{eta_suffix}")
+            stages = _stages_line(_stage_index_for(value))
+            progress(value, desc=f"{stages}\n{label}: {note}{eta_suffix}")
         return cb
 
     prepared: audio_utils.PreparedAudio | None = None
@@ -572,8 +604,9 @@ def _run_pipeline(
 
         progress(1.0, desc="Готово")
 
-        # Preview — рендерим TXT (пока без переименования).
-        preview = exporters.to_txt(aligned)
+        # F17/F18: preview — HTML с кликабельными таймкодами вместо plain text.
+        # При первом экспорте speakers_map ещё пуст — рендерим с исходными метками.
+        preview = _render_transcript_html(aligned, speakers_map=None)
         elapsed = time.time() - t0
         status_msgs.append(f"[done] {elapsed:.1f}s")
 
@@ -690,6 +723,176 @@ def _load_session_from_disk(stem_path_str: str) -> dict[str, Any] | None:
         "aligned": aligned_dicts,
         "meta": m.to_dict(),
     }
+
+
+# ---------- F17/F18: HTML-рендер транскрипта ----------
+
+def _format_hhmmss(sec: float) -> str:
+    """`00:01:23` или `01:23` для коротких. Используется в кликабельных таймкодах."""
+    sec = max(0, int(sec))
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def _escape_html(text: str) -> str:
+    """Минимальный HTML-эскейп. Хватает для превью транскрипта (нет тегов внутри)."""
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+    )
+
+
+def _render_transcript_html(
+    segments: list[alignment.AlignedSegment],
+    speakers_map: dict[str, str] | None = None,
+) -> str:
+    """Срендерить транскрипт в HTML с кликабельными таймкодами.
+
+    Структура:
+        <div id="transcript">
+          <div class="turn" data-speaker="...">
+            <span class="speaker">Никита</span>
+            <span class="time" data-sec="65.3">01:05</span>
+            <span class="text">текст реплики</span>
+          </div>
+          ...
+        </div>
+
+    JS-handler (см. UI ниже) ловит клик по .time и перематывает <audio>.
+    Поиск в .text работает аналогично через JS.
+
+    Соседние сегменты одного спикера объединяются в один .turn — читать проще.
+    Таймкод берётся от ПЕРВОЙ реплики группы.
+    """
+    if not segments:
+        return ('<div id="transcript" class="t-empty">'
+                '<em>Транскрипт появится здесь после обработки.</em></div>')
+
+    blocks: list[str] = []
+    current_display: str | None = None
+    current_start: float = 0.0
+    buf_texts: list[str] = []
+
+    def flush() -> None:
+        if current_display is None or not buf_texts:
+            return
+        speaker_esc = _escape_html(current_display)
+        time_label = _format_hhmmss(current_start)
+        text_esc = _escape_html(" ".join(t.strip() for t in buf_texts if t.strip()))
+        blocks.append(
+            f'<div class="turn" data-speaker="{speaker_esc}">'
+            f'<span class="speaker">{speaker_esc}</span>'
+            f'<span class="time" data-sec="{current_start:.2f}" '
+            f'title="перейти к {time_label}">{time_label}</span>'
+            f'<span class="text">{text_esc}</span>'
+            f"</div>"
+        )
+
+    for seg in segments:
+        display = (
+            speakers_map.get(seg.speaker, "").strip() if speakers_map else ""
+        ) or seg.speaker
+        if display != current_display:
+            flush()
+            current_display = display
+            current_start = float(seg.start)
+            buf_texts = []
+        text = seg.text.strip()
+        if text:
+            buf_texts.append(text)
+    flush()
+
+    return '<div id="transcript">\n' + "\n".join(blocks) + "\n</div>"
+
+
+# CSS + JS для кликабельных таймкодов и поиска. Один <style>+<script>, вешаем
+# глобально в начале UI через gr.HTML. JS — vanilla, без зависимостей.
+TRANSCRIPT_CSS_JS = """
+<style>
+#transcript { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; }
+#transcript .turn { margin: 0.6em 0; padding: 0.5em 0.7em; border-radius: 6px;
+                    background: #f8f8fb; border-left: 3px solid #6366f1; }
+#transcript .turn:hover { background: #f1f1f8; }
+#transcript .turn.t-hidden { display: none; }
+#transcript .speaker { font-weight: 600; color: #4338ca; margin-right: 0.6em; }
+#transcript .time { display: inline-block; min-width: 4em; color: #6b7280;
+                    cursor: pointer; user-select: none; font-variant-numeric: tabular-nums;
+                    margin-right: 0.8em; padding: 0 0.3em; border-radius: 3px; }
+#transcript .time:hover { background: #6366f1; color: white; }
+#transcript .text { color: #1f2937; }
+#transcript .text mark { background: #fef3c7; padding: 0 0.15em; border-radius: 2px; }
+#transcript .t-empty { color: #9ca3af; font-style: italic; padding: 2em; text-align: center; }
+</style>
+<script>
+(function () {
+  // Делегирование: ставим один listener на document, ловим клик по .time
+  // в любом #transcript. Так работает даже при обновлении preview через Gradio.
+  document.addEventListener('click', function (e) {
+    const t = e.target.closest('.time');
+    if (!t) return;
+    const sec = parseFloat(t.dataset.sec);
+    if (isNaN(sec)) return;
+    // Берём первый <audio> на странице — это gr.Audio плеер.
+    const audio = document.querySelector('audio');
+    if (audio) {
+      audio.currentTime = sec;
+      audio.play().catch(() => {/* пользователь не interacted ещё — ОК */});
+    }
+  });
+
+  // F18: поиск с подсветкой <mark> + скрытие не-матчей.
+  // Вешаем на любой <input> с classList.contains('transcript-search-input').
+  window.__transcriberSearch = function (query) {
+    const q = (query || '').trim().toLowerCase();
+    const turns = document.querySelectorAll('#transcript .turn');
+    let matched = 0;
+    turns.forEach(function (turn) {
+      const textEl = turn.querySelector('.text');
+      if (!textEl) return;
+      // Восстанавливаем оригинал — храним в data-original при первой подсветке.
+      if (!textEl.dataset.original) textEl.dataset.original = textEl.textContent;
+      const original = textEl.dataset.original;
+      if (!q) {
+        textEl.textContent = original;
+        turn.classList.remove('t-hidden');
+        matched++;
+        return;
+      }
+      const idx = original.toLowerCase().indexOf(q);
+      if (idx < 0) {
+        textEl.textContent = original;
+        turn.classList.add('t-hidden');
+      } else {
+        const before = original.slice(0, idx);
+        const match = original.slice(idx, idx + q.length);
+        const after = original.slice(idx + q.length);
+        textEl.innerHTML = '';
+        textEl.appendChild(document.createTextNode(before));
+        const mark = document.createElement('mark');
+        mark.textContent = match;
+        textEl.appendChild(mark);
+        textEl.appendChild(document.createTextNode(after));
+        turn.classList.remove('t-hidden');
+        matched++;
+      }
+    });
+    // Обновляем счётчик в #transcript-search-count если есть.
+    const cnt = document.querySelector('#transcript-search-count');
+    if (cnt) {
+      cnt.textContent = q
+        ? (matched > 0 ? 'Найдено: ' + matched + ' реплик' : 'Ничего не найдено')
+        : '';
+    }
+    return matched;
+  };
+})();
+</script>
+"""
 
 
 def _transcribe_via_subprocess(
@@ -887,8 +1090,8 @@ def _apply_speaker_names(
         log.warning("save_meta failed: %s", e)
         # Не фатально — экспорты записаны.
 
-    # Превью с применёнными именами.
-    preview = exporters.to_txt(aligned, speakers_map=mapping or None)
+    # Превью с применёнными именами (HTML).
+    preview = _render_transcript_html(aligned, speakers_map=mapping or None)
     applied = ", ".join(f"{k}→{v}" for k, v in mapping.items()) or "пусто"
     status = f"✓ Пересохранено с маппингом: {applied}"
 
@@ -950,6 +1153,9 @@ def build_ui() -> gr.Blocks:
         theme = gr.themes.Soft()
 
     with gr.Blocks(title="Локальный транскрибатор", theme=theme) as demo:
+        # F17/F18: подгружаем CSS+JS для кликабельных таймкодов и поиска.
+        # Один раз на страницу, дальше работает через делегирование events.
+        gr.HTML(TRANSCRIPT_CSS_JS)
         gr.Markdown(
             f"""
             # Локальный транскрибатор (offline)
@@ -1108,8 +1314,8 @@ def build_ui() -> gr.Blocks:
                     elem_id="empty-state-hint",
                 )
                 # F17: audio-плеер с прослушиванием загруженного файла.
-                # Кликабельные таймкоды в превью — требует HTML+JS рендеринг
-                # и значительной переделки preview_out — отложено.
+                # JS-handler в TRANSCRIPT_CSS_JS слушает клики по .time в #transcript
+                # и перематывает этот плеер на нужный момент. Один <audio> на странице.
                 audio_player = gr.Audio(
                     label="Прослушать",
                     type="filepath",
@@ -1117,36 +1323,41 @@ def build_ui() -> gr.Blocks:
                     visible=False,  # покажем когда загрузят файл
                 )
                 status_out = gr.Textbox(label="Статус", lines=6, interactive=False)
-                preview_out = gr.Textbox(label="Результат", lines=20, interactive=False)
 
-                # F18: поиск по транскрипту в превью (текстовый, через Python).
-                # Markdown не принимает scale — оборачиваем в Column со scale.
+                # F17/F18: транскрипт как HTML — кликабельные таймкоды и подсветка
+                # совпадений работают на клиенте через JS из TRANSCRIPT_CSS_JS.
+                preview_html = gr.HTML(
+                    value='<div id="transcript" class="t-empty">'
+                          '<em>Транскрипт появится здесь после обработки.</em></div>',
+                    label="Результат",
+                )
+
+                # F18: поиск.
+                # Чтобы работало мгновенно (без round-trip к Python), вызов на change
+                # сразу запускает window.__transcriberSearch через js= параметр Gradio.
+                # input.value передаётся в JS как первый аргумент.
                 with gr.Row():
                     with gr.Column(scale=4):
                         search_in = gr.Textbox(
                             label="Поиск в транскрипте",
                             placeholder="введи слово",
+                            elem_classes=["transcript-search-input"],
                         )
                     with gr.Column(scale=1):
-                        search_count = gr.Markdown("")
+                        # Счётчик обновляется JS-ом, поэтому это пустой <div> с нужным id.
+                        gr.HTML(
+                            value='<div id="transcript-search-count" '
+                                  'style="padding-top:1.6em;color:#6b7280;font-size:0.9em;"></div>',
+                        )
 
-                def _search_in_preview(query: str, full_text: str) -> tuple[str, str]:
-                    """Фильтрация строк превью по query. Кейс-инсенситивный.
-
-                    Если query пустой — возвращаем оригинал.
-                    """
-                    if not query or not query.strip():
-                        return full_text, ""
-                    q = query.strip().lower()
-                    matched = [line for line in full_text.splitlines() if q in line.lower()]
-                    if not matched:
-                        return full_text, f"_Не найдено_"
-                    return "\n".join(matched), f"_Найдено: {len(matched)} строк_"
-
+                # JS-only обработчик: gradio пропускает js="..." как клиентский callback.
+                # Возвращаем то же значение что прислали (input.value) — Gradio не должен
+                # ходить на backend для этого поиска.
                 search_in.change(
-                    fn=_search_in_preview,
-                    inputs=[search_in, preview_out],
-                    outputs=[preview_out, search_count],
+                    fn=None,
+                    inputs=[search_in],
+                    outputs=[],
+                    js="(q) => { window.__transcriberSearch && window.__transcriberSearch(q); return []; }",
                 )
 
         # F11: in-memory снапшот сессии (aligned + meta), чтобы re-export не требовал
@@ -1431,7 +1642,7 @@ def build_ui() -> gr.Blocks:
                 mic_in,      # F16: микрофон-источник
             ],
             outputs=[
-                preview_out,
+                preview_html,
                 status_out,
                 txt_out,
                 srt_out,
@@ -1447,7 +1658,7 @@ def build_ui() -> gr.Blocks:
             fn=_apply_speaker_names,
             inputs=[speakers_table, session_state],
             outputs=[
-                preview_out, status_out,
+                preview_html, status_out,
                 txt_out, srt_out, vtt_out, json_out, md_out,
             ],
         )
@@ -1482,7 +1693,7 @@ def build_ui() -> gr.Blocks:
             meta = meta_mod.MeetingMeta.from_dict(state["meta"])
             mapping = meta.display_name_mapping()
             rows = _build_speaker_rows(aligned, mapping)
-            preview = exporters.to_txt(aligned, speakers_map=mapping or None)
+            preview = _render_transcript_html(aligned, speakers_map=mapping or None)
 
             # Файлы — собираем из meta.files если есть, иначе строим из stem.
             def _path_or_none(suffix: str) -> str | None:
@@ -1514,7 +1725,7 @@ def build_ui() -> gr.Blocks:
             fn=_open_meeting,
             inputs=[history_dropdown],
             outputs=[
-                preview_out, status_out,
+                preview_html, status_out,
                 txt_out, srt_out, vtt_out, json_out, md_out,
                 speakers_table, session_state,
             ],
