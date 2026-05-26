@@ -286,11 +286,11 @@
       "id": "F26-rotation",
       "title": "Ротация outputs/ и cache/",
       "priority": "P2",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": [],
       "spec": "См. TZ-v2-improvements.md §F26. config retention_days=60, max_entries=100. Lifespan startup + кнопка в UI.",
       "verification": "Unit на cleanup_old_outputs с фейковыми mtime.",
-      "evidence": null
+      "evidence": "src/rotation.py: scan_outputs (группирует по stem, .meta.json как double extension), cleanup_outputs (retention+overflow+dry_run), folder_stats, human_size. 15 тестов test_rotation.py зелёные. app.py: _startup_cleanup() при импорте + accordion 'Управление местом' со счётчиком и кнопкой. Pytest 97/97."
     }
   ]
 }
