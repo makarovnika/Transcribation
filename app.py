@@ -316,8 +316,27 @@ def _run_pipeline(
             ),
             None, None, None, None, None, [], {},
         )
+    # Soft-block medium/turbo с диаризацией на 8 ГБ — мы это уже ловили jetsam'ом
+    # в реальных прогонах. medium (~1.5 ГБ MLX) + pyannote (~1.5 ГБ torch) +
+    # macOS service + браузер = пик >8 ГБ, jetsam убивает молча, без trace.
+    # Реальный фикс — sequential pipeline через subprocess (отдельная задача,
+    # см. taskcreate ниже). Пока — отказываем явно.
     if _LOW_RAM and do_diarize and model_size in ("medium", "large-v3-turbo"):
-        log.warning("%s+diarize on low RAM (%.1f GB) — risky", model_size, _TOTAL_RAM_GB)
+        return (
+            "",
+            (
+                f"⚠️ {model_size} + диаризация одновременно требует ~3.5+ ГБ "
+                f"только под модели — на {_TOTAL_RAM_GB:.1f} ГБ RAM macOS прибивает "
+                "процесс молча (jetsam).\n\n"
+                "Что можно сделать:\n"
+                f"  • выбери модель `small` + диаризация (помещается), или\n"
+                f"  • оставь `{model_size}` но **выключи диаризацию** (тогда метки "
+                "всех реплик будут `UNKNOWN`).\n\n"
+                "Полноценно `medium+diarize` будет возможно после реализации "
+                "sequential pipeline (subprocess для Whisper → unload → pyannote)."
+            ),
+            None, None, None, None, None, [], {},
+        )
 
     # 0. Сохраняем токен, если просили — независимо от итога транскрибации.
     hf_token = hf_token_input.strip() if hf_token_input else None
