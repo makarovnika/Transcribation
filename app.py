@@ -58,19 +58,39 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 
 def _total_ram_gb() -> float:
-    """Сколько физической RAM на машине. Через sysctl, не зависим от psutil.
+    """Сколько физической RAM на машине. Кросс-платформенно.
 
     Нужно чтобы подсказать пользователю безопасную конфигурацию: large-v3 +
-    диаризация одновременно требует ~5-6 ГБ и на 8-ГБ Mac стабильно ловит jetsam.
+    диаризация одновременно требует ~5-6 ГБ и на 8-ГБ машине стабильно ловит
+    OOM-kill (jetsam на macOS, OutOfMemoryError на Windows).
+
+    Стратегия:
+    1. psutil.virtual_memory().total — основной путь, работает на macOS / Windows / Linux.
+    2. sysctl hw.memsize — fallback только на macOS если psutil не установлен
+       (psutil в наших зависимостях, но мало ли — старая среда, ручная сборка).
+    3. 0.0 — если ничего не сработало. Тогда _LOW_RAM = False, защиты не сработают,
+       но и приложение не упадёт.
     """
-    import subprocess
     try:
-        out = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"], check=True, capture_output=True, text=True
-        )
-        return int(out.stdout.strip()) / (1024 ** 3)
-    except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
-        return 0.0  # неизвестно — лучше не блокировать, просто не подсвечиваем warning
+        import psutil
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except ImportError:
+        pass  # пробуем fallback ниже
+
+    if sys.platform == "darwin":
+        import subprocess
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                check=True, capture_output=True, text=True,
+            )
+            return int(out.stdout.strip()) / (1024 ** 3)
+        except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
+            pass
+
+    # На Windows без psutil — sysctl тоже нет. На Linux то же самое.
+    # Возвращаем 0.0 — _LOW_RAM=False, soft-block отключён. Юзер сам разберётся.
+    return 0.0
 
 
 # Порог «низкой» RAM, ниже которого мы переключаем дефолты на лёгкий пресет.

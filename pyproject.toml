@@ -20,6 +20,9 @@ dependencies = [
     "ffmpeg-python>=0.2.0",
     "pydantic>=2.0",
     "soundfile>=0.12",
+    # F27: psutil — кросс-платформенно даёт RAM/CPU без вызовов sysctl/wmic.
+    # Косвенно уже тянется torch'ем, но явная зависимость безопаснее.
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]

@@ -133,3 +133,20 @@
 
 **Блокеры:**
 - Нет.
+
+---
+
+## Session 005 — 2026-05-26 (v2 kickoff)
+
+Получено ТЗ на v2: `TZ-v2-improvements.md` (47 КБ), `TZ-v2-handoff-prompt.md`.
+`feature_list.json` заменён на v2-версию (19 новых фич F11-F29 поверх старых F01-F10).
+`feature_list-v2.json` удалён, источник правды — обновлённый `feature_list.json`.
+
+**Выбранный первый шаг (по handoff §E):** F27 — `_total_ram_gb` через `psutil`
+вместо `sysctl`. Это P0 bugfix, изолированный, ни от чего не зависит, быстро.
+На Windows текущий `sysctl hw.memsize` возвращает 0.0, поэтому `_LOW_RAM` всегда
+False, и soft-block large-v3 не срабатывает.
+
+**Дальше:** F11 (переименование спикеров) — фундамент для F12, F14, F17-F19, F22, F23.
+
+**Блокеры:** нет.

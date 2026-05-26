@@ -1,5 +1,5 @@
 {
-  "$schema_note": "Источник правды по фичам. Статусы: not_started | in_progress | passing | blocked. Поле evidence — что именно проверили и как.",
+  "$schema_note": "v2 — улучшения после MVP. Статусы: not_started | in_progress | passing | blocked. Все детали — в TZ-v2-improvements.md.",
   "features": [
     {
       "id": "F01-device",
@@ -9,7 +9,7 @@
       "depends_on": [],
       "spec": "src/device.py: get_whisper_backend() -> 'mlx'; get_pyannote_device() -> 'mps'|'cpu'. Транскрибация через mlx-whisper (Metal), pyannote через torch на MPS.",
       "verification": "pytest tests/test_device.py + ручной запуск.",
-      "evidence": "pytest tests/test_device.py — 3 теста зелёные. Реальное использование: pyannote='mps', whisper='mlx' видны в UI (RAM: 8.0 ГБ строка)."
+      "evidence": "pytest tests/test_device.py — 3 теста зелёные. Реальное использование: pyannote='mps', whisper='mlx' видны в UI."
     },
     {
       "id": "F02-audio-utils",
@@ -17,9 +17,9 @@
       "priority": "P0",
       "status": "passing",
       "depends_on": [],
-      "spec": "src/audio_utils.py: prepare_audio(path) -> PreparedAudio с WAV 16kHz mono. Поддержка mp3/wav/m4a/flac/ogg/opus/aac/mp4/mov/mkv/avi/webm. probe_duration(path) -> float секунд.",
+      "spec": "src/audio_utils.py: prepare_audio(path) -> PreparedAudio с WAV 16kHz mono. Поддержка mp3/wav/m4a/flac/ogg/opus/aac/mp4/mov/mkv/avi/webm.",
       "verification": "Ручная конвертация короткого mp3 → wav. Проверка длительности.",
-      "evidence": "Реально работало в end-to-end smoke: 40 МБ mp3 (Гороховая улица 17) корректно сконвертирован в 16 kHz mono wav, probe_duration=3600.0s, после транскрибации finally cleanup сработал."
+      "evidence": "Реально работало в end-to-end smoke: 40 МБ mp3 корректно сконвертирован в 16 kHz mono wav, probe_duration=3600.0s."
     },
     {
       "id": "F03-transcription",
@@ -27,9 +27,9 @@
       "priority": "P0",
       "status": "passing",
       "depends_on": ["F01-device", "F02-audio-utils"],
-      "spec": "src/transcription.py: transcribe(audio_path, model_size, language, chunk_seconds, cache_dir, resume) — генератор Segment с offset. mlx-whisper (Metal). Чанки по 10 мин, дамп partial JSON после каждого чанка, resume из cache.",
-      "verification": "Synthetic smoke на 3-сек wav с моделью tiny — успешный pipeline без ошибок. Resume повторного вызова: 0.1s vs 17s.",
-      "evidence": "Smoke прошёл (skill: 17.3s первый вызов tiny, 0.10s resume). 27/27 pytest. Чанкинг + cache работают; condition_on_previous_text=False для длинных файлов."
+      "spec": "src/transcription.py: transcribe(...) — генератор Segment с offset. mlx-whisper (Metal). Чанки по 10 мин, дамп partial JSON после каждого чанка, resume из cache.",
+      "verification": "Synthetic smoke на 3-сек wav + resume.",
+      "evidence": "Smoke прошёл (17.3s первый вызов tiny, 0.10s resume). 27/27 pytest. Чанкинг + cache работают."
     },
     {
       "id": "F04-diarization",
@@ -37,9 +37,9 @@
       "priority": "P0",
       "status": "passing",
       "depends_on": ["F01-device"],
-      "spec": "src/diarization.py: diarize(audio_path, num_speakers, hf_token, progress_callback, cache_dir) -> list[SpeakerSegment]. Модель pyannote/speaker-diarization-3.1 (3.3+ API: token=, DiarizeOutput.speaker_diarization). Кэш в cache/diar_<hash>_<params>.json.",
+      "spec": "src/diarization.py: diarize(...) -> list[SpeakerSegment]. Модель pyannote/speaker-diarization-3.1. Кэш в cache/diar_<hash>_<params>.json.",
       "verification": "End-to-end через UI на 60-мин файле.",
-      "evidence": "Прошло end-to-end 26.05.2026 07:00. 60-мин mp3 на 8 ГБ Mac, pyannote 3.3 на MPS, ~12.5 мин на диаризацию. 324 speaker turns в diar_160f12e16b3742b2_n0_min0_max0.json. Файл transcript_1779767956.{txt,srt,vtt,json,md} с метками SPEAKER_xx. Memory не упала благодаря del ws_iter + gc.collect() + mlx.metal.clear_cache() перед загрузкой pyannote."
+      "evidence": "60-мин mp3 на 8 ГБ Mac, pyannote 3.3 на MPS, ~12.5 мин на диаризацию. 324 speaker turns."
     },
     {
       "id": "F05-alignment",
@@ -47,9 +47,9 @@
       "priority": "P0",
       "status": "passing",
       "depends_on": [],
-      "spec": "src/alignment.py: align_speakers_with_segments(transcription, speakers) — для каждого сегмента находит спикера с максимальным временным перекрытием. Если пересечений нет — UNKNOWN.",
-      "verification": "pytest tests/test_alignment.py — синтетика с перекрытиями, пробелами, граничными случаями.",
-      "evidence": "10 тестов написаны в tests/test_alignment.py. Ключевые сценарии прогнаны через python3 -c, все assert проходят: empty, inside, overlap-max, outside, touch, unsorted. Полный pytest — после ./init.sh."
+      "spec": "src/alignment.py: align_speakers_with_segments(...). Sweep-line max-overlap.",
+      "verification": "pytest tests/test_alignment.py — синтетика.",
+      "evidence": "10 тестов в tests/test_alignment.py, все assert проходят."
     },
     {
       "id": "F06-exporters",
@@ -57,9 +57,9 @@
       "priority": "P0",
       "status": "passing",
       "depends_on": ["F05-alignment"],
-      "spec": "src/exporters.py: to_txt/srt/vtt/json/md + write_* обёртки. SRT: HH:MM:SS,mmm. VTT: WEBVTT header + HH:MM:SS.mmm.",
-      "verification": "pytest tests/test_exporters.py — проверка форматов по эталонам.",
-      "evidence": "12 тестов в tests/test_exporters.py. Прогнаны вручную: ts (SRT/VTT), txt группировка, srt placeholder для пустых, vtt header и точка в ms, json round-trip с UTF-8, md заголовки спикеров и таймкоды HH:MM:SS. Все assert проходят."
+      "spec": "src/exporters.py: to_txt/srt/vtt/json/md + write_* обёртки.",
+      "verification": "pytest tests/test_exporters.py.",
+      "evidence": "12 тестов в tests/test_exporters.py зелёные."
     },
     {
       "id": "F07-config",
@@ -67,19 +67,19 @@
       "priority": "P1",
       "status": "passing",
       "depends_on": [],
-      "spec": "src/config.py: get_hf_token() — порядок: explicit arg → env HF_TOKEN → ~/.config/transcriber/config.json → None. save_hf_token(token). Атомарная запись + chmod 0600.",
-      "verification": "Ручная проверка: записать токен, прочитать его обратно.",
-      "evidence": "Smoke в изолированном HOME: empty, save/load, ENV > файл, explicit > ENV, очистка пустой строкой. Все assert проходят."
+      "spec": "src/config.py: get_hf_token() — порядок: explicit > env > файл. save_hf_token() атомарно + chmod 0600.",
+      "verification": "Ручная проверка с изолированным HOME.",
+      "evidence": "Все assert проходят: empty, save/load, ENV > файл, explicit > ENV."
     },
     {
       "id": "F08-gradio-ui",
-      "title": "Gradio UI",
+      "title": "Gradio UI (v1)",
       "priority": "P0",
       "status": "passing",
       "depends_on": ["F03-transcription", "F04-diarization", "F05-alignment", "F06-exporters", "F07-config"],
-      "spec": "app.py: все UI-элементы из ТЗ §3.1 — выбор файла, модели, диаризация, num_speakers, язык, кнопка, прогресс, превью, 5 кнопок скачивания.",
-      "verification": "python app.py → открыть http://127.0.0.1:7860 → загрузить файл → получить результат → скачать все 5 форматов.",
-      "evidence": "Прогнано end-to-end на 60-мин mp3 (Гороховая улица 17, ~40 МБ). Модель small + diarize=False. Результат — 5 файлов в outputs/ (transcript_1779736448.{txt,srt,vtt,json,md}). TXT содержит осмысленный русский текст (имена, термины). Метка [UNKNOWN] корректно проставлена (diarize=False). Дефолты подкручены под 8 ГБ RAM (small + без diarize). Soft-block large-v3 на <12 ГБ работает. Лог: 22:14:08 cache complete, 22:14 выгрузка файлов."
+      "spec": "app.py: все UI-элементы — выбор файла, модели, диаризация, num_speakers, язык, кнопка, прогресс, превью, 5 кнопок скачивания.",
+      "verification": "python app.py → e2e через браузер.",
+      "evidence": "Прогнано end-to-end на 60-мин mp3."
     },
     {
       "id": "F09-readme",
@@ -87,9 +87,9 @@
       "priority": "P1",
       "status": "in_progress",
       "depends_on": ["F08-gradio-ui"],
-      "spec": "README: brew install ffmpeg → uv venv → uv pip install -e . → HF-токен → python app.py. Раздел про подводные камни.",
+      "spec": "README: установка, HF-токен, запуск, подводные камни.",
       "verification": "Свежий чекаут → следование README → приложение запускается.",
-      "evidence": "README.md написан со всеми разделами: установка, токен, запуск, форматы, perf, подводные камни (5 шт), тесты, структура. Реальная верификация — после ./init.sh."
+      "evidence": "README.md написан. После v2 — обновить раздел про UI."
     },
     {
       "id": "F10-integration-test",
@@ -97,8 +97,199 @@
       "priority": "P2",
       "status": "not_started",
       "depends_on": ["F08-gradio-ui"],
-      "spec": "tests/test_integration.py: запускает transcribe + diarize + align на sample_30s.wav с 2 спикерами. Проверяет наличие обоих спикеров в результате.",
-      "verification": "pytest tests/test_integration.py (помечен как slow / requires_models).",
+      "spec": "tests/test_integration.py: запускает transcribe + diarize + align на sample_30s.wav.",
+      "verification": "pytest tests/test_integration.py.",
+      "evidence": null
+    },
+
+    {
+      "id": "F11-speaker-renaming",
+      "title": "Переименование спикеров в UI",
+      "priority": "P0",
+      "status": "not_started",
+      "depends_on": ["F08-gradio-ui"],
+      "spec": "См. TZ-v2-improvements.md §F11. Таблица спикеров со статистикой, .meta.json sidecar, применение display_name ко всем 5 экспортам. Поддержка слияния (одинаковые имена → один спикер).",
+      "verification": "tests/test_speakers.py (расчёт статистики, edge cases) + e2e: до/после применения маппинга, diff в TXT и MD.",
+      "evidence": null
+    },
+    {
+      "id": "F12-meeting-naming",
+      "title": "Название встречи + осмысленные имена файлов",
+      "priority": "P0",
+      "status": "not_started",
+      "depends_on": ["F11-speaker-renaming"],
+      "spec": "См. TZ-v2-improvements.md §F12. Поле title в UI, формат stem '{YYYY-MM-DD}_{slug}_{hash6}'. Slug: re.sub(r'[^\\w\\-]+', '-', title.lower()), без транслитерации (Unicode word chars OK).",
+      "verification": "tests/test_naming.py: ASCII/Cyrillic/спецсимволы. E2E: ввёл название → файлы получили нужный stem.",
+      "evidence": null
+    },
+    {
+      "id": "F13-ui-redesign",
+      "title": "Тёмная тема и переработка иерархии UI",
+      "priority": "P0",
+      "status": "not_started",
+      "depends_on": ["F08-gradio-ui"],
+      "spec": "См. TZ-v2-improvements.md §F13. gr.themes.Soft(primary_hue='indigo'), reshape layout по outputs/ui-mockup.html. ETA в прогрессе через скользящее среднее. Состояния empty/error/success как отдельные плашки.",
+      "verification": "Скриншоты до/после в claude-progress.md. E2E на коротком файле — все этапы прогресса видны.",
+      "evidence": null
+    },
+    {
+      "id": "F14-meeting-history",
+      "title": "История встреч в UI",
+      "priority": "P0",
+      "status": "not_started",
+      "depends_on": ["F11-speaker-renaming", "F12-meeting-naming"],
+      "spec": "См. TZ-v2-improvements.md §F14. src/history.py: scan_meetings()/load_meeting()/delete_meeting(). UI: Accordion с последними 5 встречами + 'показать все'. Поддержка legacy без .meta.json.",
+      "verification": "tests/test_history.py (3 синтетических .meta.json → правильный порядок) + e2e: новый файл появляется без рестарта.",
+      "evidence": null
+    },
+    {
+      "id": "F15-audio-preprocessing",
+      "title": "Шумоподавление и нормализация громкости",
+      "priority": "P0",
+      "status": "not_started",
+      "depends_on": ["F02-audio-utils"],
+      "spec": "См. TZ-v2-improvements.md §F15. Чекбокс 'Шумоподавление' (default off). prepare_audio(denoise=False). ffmpeg -af 'loudnorm=I=-16:LRA=11:TP=-1.5,afftdn=nf=-25'.",
+      "verification": "Ручное сравнение на шумном файле: транскрипт без denoise vs с denoise. probe_duration не меняется. Старые pytest зелёные.",
+      "evidence": null
+    },
+    {
+      "id": "F27-cross-platform-ram",
+      "title": "psutil вместо sysctl для _total_ram_gb",
+      "priority": "P0",
+      "status": "passing",
+      "depends_on": [],
+      "spec": "См. TZ-v2-improvements.md §F27. Заменить sysctl на psutil.virtual_memory().total. Fallback на sysctl только если psutil не доступен. Добавить psutil в pyproject.toml deps.",
+      "verification": "python -c 'from app import _total_ram_gb; print(_total_ram_gb())' на Mac и на Windows возвращают ненулевое значение.",
+      "evidence": "На Mac (psutil путь): _total_ram_gb()=8.0, _LOW_RAM=True. Fallback на sysctl сохранён для случая отсутствия psutil на Mac. На Windows проверится после развёртки, но psutil работает кросс-платформенно (это его смысл). pytest 27/27 зелёные. psutil 7.2.2 явно прописан в pyproject.toml."
+    },
+    {
+      "id": "F28-diar-cache-versioning",
+      "title": "Версия pyannote в ключе кэша диаризации",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F04-diarization"],
+      "spec": "См. TZ-v2-improvements.md §F28. Добавить pyannote.__version__ в имя cache-файла: diar_<fp>_<ver>_n<n>_min<min>_max<max>.json.",
+      "verification": "Unit-тест: два вызова _diar_cache_path с разными версиями → разные пути.",
+      "evidence": null
+    },
+    {
+      "id": "F29-duration-limit",
+      "title": "Soft-warning на длинных файлах",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F02-audio-utils"],
+      "spec": "См. TZ-v2-improvements.md §F29. >4ч — warning, >8ч — hard block.",
+      "verification": "Подать фейковый 9-часовой файл (или замокать duration_sec) → корректное поведение.",
+      "evidence": null
+    },
+    {
+      "id": "F16-mic-recording",
+      "title": "Запись с микрофона прямо в UI",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F08-gradio-ui"],
+      "spec": "См. TZ-v2-improvements.md §F16. gr.Audio(sources=['microphone'], type='filepath'). Приоритет drop zone, если оба заполнены.",
+      "verification": "E2E: записать 30 сек → транскрипт получен.",
+      "evidence": null
+    },
+    {
+      "id": "F17-audio-player",
+      "title": "Аудио-плеер с переходом по таймстемпам",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F11-speaker-renaming"],
+      "spec": "См. TZ-v2-improvements.md §F17. gr.HTML с кликабельными .time (data-sec). Inline JS перематывает audio. Подсветка активного сегмента на timeupdate.",
+      "verification": "E2E: клик на таймкод второй реплики → плеер перематывает. Проверить в Chrome и Safari.",
+      "evidence": null
+    },
+    {
+      "id": "F18-transcript-search",
+      "title": "Поиск по транскрипту",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F17-audio-player"],
+      "spec": "См. TZ-v2-improvements.md §F18. gr.Textbox + JS-фильтрация .turn. Подсветка совпадений mark. Счётчик найденного.",
+      "verification": "Ручной: ввести слово → не-совпадающие реплики скрыты, совпадения подсвечены.",
+      "evidence": null
+    },
+    {
+      "id": "F19-ollama-summary",
+      "title": "Локальная суммаризация через Ollama",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F11-speaker-renaming"],
+      "spec": "См. TZ-v2-improvements.md §F19. src/summarize.py: HTTP POST http://127.0.0.1:11434/api/generate, model llama3.1:8b (env OLLAMA_MODEL). Парсинг JSON {tldr, decisions, action_items}. Fallback если Ollama не запущен.",
+      "verification": "tests/test_summarize.py с mock httpx + e2e если Ollama стоит локально.",
+      "evidence": null
+    },
+    {
+      "id": "F20-word-timestamps",
+      "title": "Word-level timestamps",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F03-transcription"],
+      "spec": "См. TZ-v2-improvements.md §F20. word_timestamps=True в обоих backends. Расширить Segment полем words: tuple[Word, ...]. Чекбокс в UI (default off).",
+      "verification": "Unit: synthetic Segment с words → JSON содержит words[]. E2E: чекбокс on → words[] непуст.",
+      "evidence": null
+    },
+    {
+      "id": "F21-turbo-model",
+      "title": "Опция модели large-v3-turbo",
+      "priority": "P1",
+      "status": "not_started",
+      "depends_on": ["F03-transcription"],
+      "spec": "См. TZ-v2-improvements.md §F21. Добавить 'large-v3-turbo' в SUPPORTED_MODELS. mlx-community/whisper-large-v3-turbo. Проверить версию faster-whisper >= 1.0.4. Soft-block при RAM < 10 ГБ.",
+      "verification": "E2E на 30-сек файле: time ≤ small × 2, текст читаем.",
+      "evidence": null
+    },
+    {
+      "id": "F22-batch",
+      "title": "Batch-обработка нескольких файлов",
+      "priority": "P2",
+      "status": "not_started",
+      "depends_on": ["F11-speaker-renaming", "F12-meeting-naming", "F14-meeting-history"],
+      "spec": "См. TZ-v2-improvements.md §F22. gr.File(file_count='multiple'), очередь, прогресс 'файл K из N'. Падение одного не блокирует остальных.",
+      "verification": "E2E: 2 коротких файла → обе сессии в outputs/.",
+      "evidence": null
+    },
+    {
+      "id": "F23-md-frontmatter",
+      "title": "MD с YAML frontmatter",
+      "priority": "P2",
+      "status": "not_started",
+      "depends_on": ["F11-speaker-renaming"],
+      "spec": "См. TZ-v2-improvements.md §F23. exporters.to_md добавляет YAML frontmatter с title/date/duration/speakers/model/language.",
+      "verification": "Открыть в Obsidian: frontmatter распознан. Unit: yaml.safe_load на первом блоке ---.",
+      "evidence": null
+    },
+    {
+      "id": "F24-notifications",
+      "title": "Системное уведомление по завершении",
+      "priority": "P2",
+      "status": "not_started",
+      "depends_on": ["F08-gradio-ui"],
+      "spec": "См. TZ-v2-improvements.md §F24. macOS: osascript. Windows: PowerShell BurntToast (опц). Или plyer cross-platform. Только для файлов >5 мин.",
+      "verification": "E2E: 6-мин файл → notification всплыло.",
+      "evidence": null
+    },
+    {
+      "id": "F25-model-comparison",
+      "title": "Сравнение моделей бок о бок",
+      "priority": "P2",
+      "status": "not_started",
+      "depends_on": ["F03-transcription"],
+      "spec": "См. TZ-v2-improvements.md §F25. Отдельная вкладка /compare. Прогон 4 моделей на коротком файле, таблица результатов.",
+      "verification": "E2E: 1-мин файл → 4 строки заполнены.",
+      "evidence": null
+    },
+    {
+      "id": "F26-rotation",
+      "title": "Ротация outputs/ и cache/",
+      "priority": "P2",
+      "status": "not_started",
+      "depends_on": [],
+      "spec": "См. TZ-v2-improvements.md §F26. config retention_days=60, max_entries=100. Lifespan startup + кнопка в UI.",
+      "verification": "Unit на cleanup_old_outputs с фейковыми mtime.",
       "evidence": null
     }
   ]
