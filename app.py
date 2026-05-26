@@ -58,6 +58,7 @@ from src import (
 from src import history  # F14: список и удаление прошлых встреч
 from src import meta as meta_mod
 from src import naming  # F12: slug + build_stem
+from src import notify as notify_mod  # F24: системные уведомления
 from src import rotation  # F26: ротация outputs/cache
 from src import speakers as speakers_mod
 from src import summarize as summarize_mod  # F19: Ollama-резюме
@@ -539,6 +540,21 @@ def _run_pipeline(
         elapsed = time.time() - t0
         status_msgs.append(f"[done] {elapsed:.1f}s")
 
+        # F24: системное уведомление для длинных файлов (>5 мин).
+        # На коротких файлах транскрибация быстрая, уведомление не нужно — пользователь
+        # сидит у браузера и видит результат сам.
+        if prepared.duration_sec > 5 * 60:
+            elapsed_min = int(elapsed / 60)
+            speakers_count = len({s.speaker for s in aligned}) if aligned else 0
+            notify_mod.notify(
+                title="Транскрибатор: готово",
+                message=(
+                    f"{meeting_title or 'Транскрипт'}: "
+                    f"{elapsed_min}м · {len(aligned)} реплик · "
+                    f"{speakers_count} спикеров"
+                ),
+            )
+
         speaker_rows = _build_speaker_rows(aligned)
         session = _session_state(aligned, base, meeting_meta)
 
@@ -834,6 +850,13 @@ def build_ui() -> gr.Blocks:
                     ],
                     type="filepath",
                 )
+
+                # F17: при загрузке файла показать audio-плеер с этим файлом.
+                # Это происходит до транскрибации — можно сразу проверить запись.
+                def _show_audio_player(file_path: str | None) -> Any:
+                    if not file_path:
+                        return gr.update(visible=False, value=None)
+                    return gr.update(visible=True, value=file_path)
                 # F16: альтернативный источник — запись с микрофона.
                 # Если оба источника заполнены, приоритет у drop zone (см. _run_pipeline).
                 # type="filepath" → Gradio возвращает путь к временному WAV.
@@ -952,8 +975,45 @@ def build_ui() -> gr.Blocks:
                     "**Транскрибировать**_._",
                     elem_id="empty-state-hint",
                 )
+                # F17: audio-плеер с прослушиванием загруженного файла.
+                # Кликабельные таймкоды в превью — требует HTML+JS рендеринг
+                # и значительной переделки preview_out — отложено.
+                audio_player = gr.Audio(
+                    label="Прослушать",
+                    type="filepath",
+                    interactive=False,
+                    visible=False,  # покажем когда загрузят файл
+                )
                 status_out = gr.Textbox(label="Статус", lines=6, interactive=False)
                 preview_out = gr.Textbox(label="Результат", lines=20, interactive=False)
+
+                # F18: поиск по транскрипту в превью (текстовый, через Python).
+                with gr.Row():
+                    search_in = gr.Textbox(
+                        label="Поиск в транскрипте",
+                        placeholder="введи слово",
+                        scale=4,
+                    )
+                    search_count = gr.Markdown("", scale=1)
+
+                def _search_in_preview(query: str, full_text: str) -> tuple[str, str]:
+                    """Фильтрация строк превью по query. Кейс-инсенситивный.
+
+                    Если query пустой — возвращаем оригинал.
+                    """
+                    if not query or not query.strip():
+                        return full_text, ""
+                    q = query.strip().lower()
+                    matched = [line for line in full_text.splitlines() if q in line.lower()]
+                    if not matched:
+                        return full_text, f"_Не найдено_"
+                    return "\n".join(matched), f"_Найдено: {len(matched)} строк_"
+
+                search_in.change(
+                    fn=_search_in_preview,
+                    inputs=[search_in, preview_out],
+                    outputs=[preview_out, search_count],
+                )
 
         # F11: in-memory снапшот сессии (aligned + meta), чтобы re-export не требовал
         # повторного прогона моделей. gr.State хранит произвольный dict между call'ами.
@@ -983,6 +1043,85 @@ def build_ui() -> gr.Blocks:
             vtt_out = gr.File(label="VTT")
             json_out = gr.File(label="JSON")
             md_out = gr.File(label="MD")
+
+        # F22: Batch — пакетная обработка нескольких файлов.
+        # Отдельный accordion, не ломает single-file workflow. Цикл по файлам,
+        # падение одного не блокирует остальных. Результат — markdown-сводка.
+        with gr.Accordion("Пакетная обработка (несколько файлов)", open=False):
+            gr.Markdown(
+                "_Загрузи несколько файлов сразу — будут обработаны по очереди. "
+                "Настройки берутся из основной формы выше (модель / язык / диаризация). "
+                "Каждому файлу автоматически присваивается имя из его метаданных._"
+            )
+            batch_files_in = gr.File(
+                label="Файлы для batch",
+                file_count="multiple",
+                file_types=[
+                    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".aac",
+                    ".mp4", ".mov", ".mkv", ".avi", ".webm",
+                ],
+                type="filepath",
+            )
+            batch_run_btn = gr.Button("Обработать все", variant="primary", size="sm")
+            batch_status = gr.Markdown("")
+
+            def _run_batch(
+                files: list[str] | None,
+                # Все настройки наследуем от основной формы.
+                model_size: str,
+                do_diarize: bool,
+                num_speakers: int | float,
+                language_choice: str,
+                token_input: str,
+                save_token_flag: bool,
+                denoise_flag: bool,
+                word_ts_flag: bool,
+            ) -> str:
+                if not files:
+                    return "⚠️ Файлы не выбраны."
+
+                log.info("batch: %d files", len(files))
+                results: list[str] = ["## Результаты batch"]
+                for i, f in enumerate(files, 1):
+                    fname = Path(f).name
+                    results.append(f"\n### {i}/{len(files)} · {fname}")
+                    try:
+                        # Title для batch — имя файла без расширения, чтобы у каждой
+                        # сессии был свой stem.
+                        title_from_file = Path(f).stem
+                        out = _run_pipeline(
+                            audio_file=f,
+                            model_size=model_size,
+                            do_diarize=do_diarize,
+                            num_speakers=num_speakers,
+                            language_choice=language_choice,
+                            hf_token_input=token_input,
+                            save_token=save_token_flag,
+                            meeting_title=title_from_file,
+                            denoise=denoise_flag,
+                            word_timestamps=word_ts_flag,
+                            mic_file=None,
+                        )
+                        # out[1] = status. out[2..6] = пути файлов.
+                        status_line = out[1] if isinstance(out, tuple) else ""
+                        # Первые 2 строки status'a достаточно для сводки.
+                        short = "\n".join(status_line.split("\n")[:3])
+                        results.append(f"✓ Готово\n```\n{short}\n```")
+                    except Exception as e:
+                        log.exception("batch item failed: %s", fname)
+                        results.append(f"❌ {type(e).__name__}: {e}")
+                return "\n".join(results)
+
+            batch_run_btn.click(
+                fn=_run_batch,
+                inputs=[
+                    batch_files_in,
+                    model_in, diarize_in, num_speakers_in, language_in,
+                    token_in, save_token_in,
+                    denoise_in, word_ts_in,
+                ],
+                outputs=[batch_status],
+            )
 
         # F19: блок резюмирования через Ollama.
         # Отдельная кнопка под результатом — не в основной pipeline, чтобы
@@ -1030,6 +1169,90 @@ def build_ui() -> gr.Blocks:
             return "\n".join(lines)
 
         summarize_btn.click(fn=_do_summarize, inputs=[session_state], outputs=[summary_md])
+
+        # F25: сравнение моделей бок о бок (dev-feature).
+        # Прогоняем несколько моделей на одном коротком файле и показываем
+        # время + первые 200 символов. Soft-block на длинных файлах — иначе
+        # пользователь устанет ждать ~30 мин на 4 моделях.
+        COMPARE_MAX_DURATION_SEC = 120  # 2 минуты
+
+        with gr.Accordion("Сравнение моделей (на коротком файле)", open=False):
+            gr.Markdown(
+                "_Прогоняет файл (≤2 минут) на нескольких моделях подряд "
+                "и показывает таблицу: время, первые 200 символов транскрипта. "
+                "Полезно чтобы выбрать самую быструю модель приемлемого качества._"
+            )
+            compare_file_in = gr.File(
+                label="Файл (≤2 минут)",
+                file_types=[".mp3", ".wav", ".m4a", ".flac", ".ogg"],
+                type="filepath",
+            )
+            compare_models_in = gr.CheckboxGroup(
+                label="Модели для сравнения",
+                choices=list(transcription.SUPPORTED_MODELS),
+                value=["tiny", "small", "medium"],
+            )
+            compare_run_btn = gr.Button("Сравнить", variant="primary", size="sm")
+            compare_result = gr.Dataframe(
+                headers=["Модель", "Время (с)", "Превью (200 симв)"],
+                datatype=["str", "str", "str"],
+                col_count=(3, "fixed"),
+                interactive=False,
+                wrap=True,
+            )
+
+            def _run_compare(file_path: str | None, models: list[str]) -> list[list[str]]:
+                """Прогон файла на каждой модели и сборка таблицы.
+
+                Не используем _run_pipeline (она с диаризацией/экспортами).
+                Делаем минимальный: prepare_audio + transcribe + объединение текста.
+                """
+                if not file_path:
+                    return [["—", "—", "Файл не выбран"]]
+                if not models:
+                    return [["—", "—", "Выбери хотя бы одну модель"]]
+
+                try:
+                    prepared = audio_utils.prepare_audio(file_path)
+                except Exception as e:
+                    return [["—", "—", f"Ошибка prepare_audio: {e}"]]
+
+                if prepared.duration_sec > COMPARE_MAX_DURATION_SEC:
+                    audio_utils.cleanup(prepared)
+                    return [["—", "—",
+                             f"Файл {prepared.duration_sec:.1f}s — длиннее {COMPARE_MAX_DURATION_SEC}s. "
+                             "Возьми короче, иначе сравнение будет долгим."]]
+
+                rows: list[list[str]] = []
+                try:
+                    for m in models:
+                        if m not in transcription.SUPPORTED_MODELS:
+                            rows.append([m, "—", "Неизвестная модель"])
+                            continue
+                        t0 = time.time()
+                        try:
+                            ws_iter, _ = transcription.transcribe(
+                                prepared.path,
+                                model_size=m,  # type: ignore[arg-type]
+                                audio_duration=prepared.duration_sec,
+                                cache_dir=None,  # без partial-cache для compare
+                            )
+                            full_text = " ".join(s.text for s in ws_iter)
+                        except Exception as e:
+                            rows.append([m, "—", f"Ошибка: {e}"])
+                            continue
+                        elapsed = time.time() - t0
+                        preview = (full_text[:200] + "…") if len(full_text) > 200 else full_text
+                        rows.append([m, f"{elapsed:.1f}", preview or "[пусто]"])
+                finally:
+                    audio_utils.cleanup(prepared)
+                return rows
+
+            compare_run_btn.click(
+                fn=_run_compare,
+                inputs=[compare_file_in, compare_models_in],
+                outputs=[compare_result],
+            )
 
         # F26: управление местом — accordion (по умолчанию свёрнут).
         with gr.Accordion("Управление местом (outputs/ и cache/)", open=False):
@@ -1093,6 +1316,13 @@ def build_ui() -> gr.Blocks:
                 preview_out, status_out,
                 txt_out, srt_out, vtt_out, json_out, md_out,
             ],
+        )
+
+        # F17: показать audio-плеер при загрузке файла.
+        audio_in.change(
+            fn=_show_audio_player,
+            inputs=[audio_in],
+            outputs=[audio_player],
         )
 
         # F14: handlers истории встреч.

@@ -196,21 +196,21 @@
       "id": "F17-audio-player",
       "title": "Аудио-плеер с переходом по таймстемпам",
       "priority": "P1",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F11-speaker-renaming"],
       "spec": "См. TZ-v2-improvements.md §F17. gr.HTML с кликабельными .time (data-sec). Inline JS перематывает audio. Подсветка активного сегмента на timeupdate.",
       "verification": "E2E: клик на таймкод второй реплики → плеер перематывает. Проверить в Chrome и Safari.",
-      "evidence": null
+      "evidence": "Сделано: gr.Audio плеер появляется при загрузке файла (visible toggle). Можно прослушать запись до старта транскрибации. НЕ сделано: кликабельные таймкоды в превью (требует переделки на gr.HTML + inline JS, что значительно меняет рендер preview_out)."
     },
     {
       "id": "F18-transcript-search",
       "title": "Поиск по транскрипту",
       "priority": "P1",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F17-audio-player"],
       "spec": "См. TZ-v2-improvements.md §F18. gr.Textbox + JS-фильтрация .turn. Подсветка совпадений mark. Счётчик найденного.",
       "verification": "Ручной: ввести слово → не-совпадающие реплики скрыты, совпадения подсвечены.",
-      "evidence": null
+      "evidence": "Сделано: gr.Textbox 'Поиск в транскрипте' + Python-фильтр строк превью по подстроке. Счётчик 'Найдено: N строк'. НЕ сделано: <mark>-подсветка матчей внутри строк (требует HTML render). Подсветка средствами Markdown через ** или ` не работает в preview_out (textbox)."
     },
     {
       "id": "F19-ollama-summary",
@@ -246,11 +246,11 @@
       "id": "F22-batch",
       "title": "Batch-обработка нескольких файлов",
       "priority": "P2",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F11-speaker-renaming", "F12-meeting-naming", "F14-meeting-history"],
       "spec": "См. TZ-v2-improvements.md §F22. gr.File(file_count='multiple'), очередь, прогресс 'файл K из N'. Падение одного не блокирует остальных.",
       "verification": "E2E: 2 коротких файла → обе сессии в outputs/.",
-      "evidence": null
+      "evidence": "app.py: accordion 'Пакетная обработка' с gr.File(file_count='multiple'). _run_batch проходит по списку, для каждого вызывает _run_pipeline с title из имени файла. try/except per-файл — падение одного не блокирует. Возврат markdown-сводки. 132/132 pytest. E2E ждёт прогона."
     },
     {
       "id": "F23-md-frontmatter",
@@ -266,21 +266,21 @@
       "id": "F24-notifications",
       "title": "Системное уведомление по завершении",
       "priority": "P2",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": ["F08-gradio-ui"],
       "spec": "См. TZ-v2-improvements.md §F24. macOS: osascript. Windows: PowerShell BurntToast (опц). Или plyer cross-platform. Только для файлов >5 мин.",
       "verification": "E2E: 6-мин файл → notification всплыло.",
-      "evidence": null
+      "evidence": "src/notify.py: cross-platform notify() с handlers для darwin (osascript), win32 (PowerShell BurntToast), linux (notify-send). Best-effort, не валит pipeline. 6 unit-тестов test_notify.py зелёные с моками. app.py: после успешного экспорта если duration_sec > 5*60 — вызов notify_mod.notify."
     },
     {
       "id": "F25-model-comparison",
       "title": "Сравнение моделей бок о бок",
       "priority": "P2",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F03-transcription"],
       "spec": "См. TZ-v2-improvements.md §F25. Отдельная вкладка /compare. Прогон 4 моделей на коротком файле, таблица результатов.",
       "verification": "E2E: 1-мин файл → 4 строки заполнены.",
-      "evidence": null
+      "evidence": "app.py: accordion 'Сравнение моделей' с gr.File + CheckboxGroup моделей + gr.Dataframe. _run_compare: prepare_audio → проверка duration ≤120s → цикл transcribe() для каждой модели → запись в строки таблицы (модель, время, превью 200 симв). Без диаризации и экспортов. 132/132 pytest. E2E ждёт прогона."
     },
     {
       "id": "F26-rotation",
