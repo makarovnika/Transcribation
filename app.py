@@ -18,9 +18,16 @@
 
 from __future__ import annotations
 
+import os
+
+# КРИТИЧНО: ставим до любого импорта ctranslate2/torch/pyannote.
+# Иначе они линкуют разные libomp.dylib (один из ctranslate2, другой из torch)
+# и процесс умирает с "OMP Error #15: libomp.dylib already initialized".
+# Это документированный workaround OpenMP (см. http://openmp.llvm.org).
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import json
 import logging
-import os
 import sys
 import time
 import traceback

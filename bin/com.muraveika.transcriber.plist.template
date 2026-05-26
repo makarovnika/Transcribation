@@ -49,6 +49,10 @@
     <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>PYTHONUNBUFFERED</key>
     <string>1</string>
+    <!-- Workaround OMP Error #15: ctranslate2 и torch тянут разные libomp.dylib,
+         процесс крашится без этого. См. начало app.py. -->
+    <key>KMP_DUPLICATE_LIB_OK</key>
+    <string>TRUE</string>
   </dict>
 
   <key>ProcessType</key>
