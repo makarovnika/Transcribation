@@ -78,9 +78,16 @@ class Segment:
     words: tuple[Word, ...] = ()
 
 
-@dataclass(frozen=True)
+@dataclass
 class TranscriptionMeta:
-    """Метаданные транскрибации."""
+    """Метаданные транскрибации.
+
+    Не frozen — detected_language заполняется ПОСЛЕ итерации сегментов
+    (Whisper определяет язык внутри _gen() через nonlocal). frozen-вариант
+    сохранял бы снимок None и приводил к detected_language=null в .meta.json
+    при использовании через subprocess (где meta сериализуется в JSON
+    после полной итерации).
+    """
 
     detected_language: str | None
     duration: float | None
@@ -370,6 +377,10 @@ def transcribe(
 
             if detected_lang is None and lang_from_chunk:
                 detected_lang = lang_from_chunk
+                # Обновляем meta inplace — теперь TranscriptionMeta не frozen.
+                # Без этого detected_language в meta остаётся None даже после
+                # успешного определения языка (см. docstring TranscriptionMeta).
+                meta.detected_language = detected_lang
 
             for seg in seg_dicts:
                 # F20: если есть words — конвертируем в кортеж Word с offset.

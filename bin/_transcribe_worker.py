@@ -60,7 +60,9 @@ def main() -> int:
     parser.add_argument("--language", default=None, help="ru/en/None")
     parser.add_argument("--chunk-seconds", type=int, default=600)
     parser.add_argument("--cache-dir", default=None)
-    parser.add_argument("--word-timestamps", type=int, default=0)
+    # Принимаем как int (0/1). type=int парсит «0» → 0, «1» → 1, и `bool(0)=False`.
+    # Раньше был implicit cast str→bool, который давал True для любой непустой строки.
+    parser.add_argument("--word-timestamps", type=int, default=0, choices=[0, 1])
     parser.add_argument("--output", required=True, help="path to JSON with result")
     args = parser.parse_args()
 
