@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -54,10 +55,12 @@ from src import (
 # F11: модули для переименования спикеров и sidecar meta.json.
 # meta переименован в meta_mod, чтобы не конфликтовать с локальной переменной meta
 # (TranscriptionMeta), которую возвращает transcription.transcribe().
+from src import history  # F14: список и удаление прошлых встреч
 from src import meta as meta_mod
 from src import naming  # F12: slug + build_stem
 from src import rotation  # F26: ротация outputs/cache
 from src import speakers as speakers_mod
+from src import summarize as summarize_mod  # F19: Ollama-резюме
 
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
 OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -573,6 +576,69 @@ def _run_pipeline(
             audio_utils.cleanup(prepared)
 
 
+# ---------- F14: helpers для истории встреч ----------
+
+def _history_choices() -> list[tuple[str, str]]:
+    """Список встреч для gr.Dropdown — пары (label, value).
+
+    label — человеческое: "Sync · сегодня · 47m · 3 спикера".
+    value — stem_path, чтобы по value найти что грузить/удалять.
+    """
+    items = history.scan_meetings(OUTPUTS_DIR)
+    if not items:
+        return []
+    out: list[tuple[str, str]] = []
+    for m in items[:50]:  # лимит, иначе dropdown становится медленным
+        rel = history.format_relative_date(m.created_ts)
+        dur_min = int(m.duration_sec / 60) if m.duration_sec > 0 else 0
+        dur_str = f"{dur_min}м" if dur_min > 0 else ""
+        sp_str = f"{m.speakers_count}сп" if m.speakers_count > 0 else ""
+        legacy_marker = " · (legacy)" if m.is_legacy else ""
+        parts = [m.title, rel, dur_str, sp_str]
+        label = " · ".join(p for p in parts if p) + legacy_marker
+        out.append((label, str(m.stem_path)))
+    return out
+
+
+def _load_session_from_disk(stem_path_str: str) -> dict[str, Any] | None:
+    """Восстановить state-dict из <stem>.meta.json + <stem>.json.
+
+    Используется когда пользователь открывает старую встречу из истории
+    и хочет применить новый маппинг спикеров (re-export). aligned segments
+    парсим из .json экспорта.
+    """
+    stem_path = Path(stem_path_str)
+    json_p = stem_path.with_suffix(".json")
+    if not json_p.exists():
+        log.warning("history: no .json for stem %s", stem_path)
+        return None
+    try:
+        with json_p.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning("history: failed to read %s: %s", json_p, e)
+        return None
+
+    aligned_dicts: list[dict[str, Any]] = []
+    for seg in data.get("segments", []):
+        # JSON содержит speaker (display) и speaker_id (исходный). Для resyle
+        # берём speaker_id, чтобы apply_mapping работал с теми же метками,
+        # как при первом экспорте.
+        aligned_dicts.append({
+            "start": float(seg.get("start", 0.0)),
+            "end": float(seg.get("end", 0.0)),
+            "text": str(seg.get("text", "")),
+            "speaker": str(seg.get("speaker_id") or seg.get("speaker", "UNKNOWN")),
+        })
+
+    m = meta_mod.load_meta(stem_path) or meta_mod.MeetingMeta(id=stem_path.name)
+    return {
+        "stem_path": str(stem_path),
+        "aligned": aligned_dicts,
+        "meta": m.to_dict(),
+    }
+
+
 def _render_storage_status() -> str:
     """F26: красивая строка с занимаемым местом для UI accordion."""
     out_bytes, out_files = rotation.folder_stats(OUTPUTS_DIR)
@@ -858,6 +924,25 @@ def build_ui() -> gr.Blocks:
 
                 run_btn = gr.Button("Транскрибировать", variant="primary")
 
+                # F14: история встреч под левой колонкой.
+                # Dropdown — простое UX в Gradio. Полноценные карточки с кликом
+                # требуют HTML+JS (это уже F17 уровень). Здесь — минимум, который
+                # покрывает основной use-case: «открыть прошлую встречу для re-export».
+                with gr.Accordion("История встреч", open=True):
+                    history_dropdown = gr.Dropdown(
+                        label="Прошлые встречи",
+                        choices=_history_choices(),
+                        value=None,
+                        interactive=True,
+                    )
+                    with gr.Row():
+                        history_refresh_btn = gr.Button("Обновить список", size="sm")
+                        history_open_btn = gr.Button("Открыть", size="sm", variant="primary")
+                        history_delete_btn = gr.Button(
+                            "Удалить", size="sm", variant="stop",
+                        )
+                    history_status = gr.Markdown("")
+
             with gr.Column(scale=3):
                 # F13: empty-state карточка над статусом — пока файл не загружен,
                 # показываем подсказку. После первого click её можно оставить
@@ -898,6 +983,53 @@ def build_ui() -> gr.Blocks:
             vtt_out = gr.File(label="VTT")
             json_out = gr.File(label="JSON")
             md_out = gr.File(label="MD")
+
+        # F19: блок резюмирования через Ollama.
+        # Отдельная кнопка под результатом — не в основной pipeline, чтобы
+        # медленная LLM не блокировала транскрибацию.
+        gr.Markdown("### Резюме (локально через Ollama)")
+        with gr.Row():
+            summarize_btn = gr.Button(
+                "Получить резюме",
+                variant="secondary",
+                size="sm",
+            )
+        summary_md = gr.Markdown(
+            "_Резюме появится здесь. Нужен запущенный Ollama: "
+            "`brew install ollama && ollama serve && ollama pull llama3.1`._"
+        )
+
+        def _do_summarize(state: dict[str, Any]) -> str:
+            if not state or "aligned" not in state:
+                return "⚠️ Нет данных. Сначала транскрибируй файл."
+            aligned = _restore_aligned(state)
+            meta = meta_mod.MeetingMeta.from_dict(state.get("meta", {}))
+            mapping = meta.display_name_mapping()
+            try:
+                r = summarize_mod.summarize_transcript(aligned, speakers_map=mapping or None)
+            except summarize_mod.SummarizeError as e:
+                return f"❌ {e}"
+
+            # Запишем summary в .meta.json (F19 §5).
+            stem_path = Path(state["stem_path"])
+            meta.summary = r.to_dict()
+            try:
+                meta_mod.save_meta(stem_path, meta)
+            except OSError as e:
+                log.warning("save_meta after summary failed: %s", e)
+
+            # Markdown рендеринг.
+            lines = ["## TL;DR", r.tldr or "_пусто_", ""]
+            if r.decisions:
+                lines.append("## Решения")
+                lines += [f"- {d}" for d in r.decisions]
+                lines.append("")
+            if r.action_items:
+                lines.append("## Action items")
+                lines += [f"- {a}" for a in r.action_items]
+            return "\n".join(lines)
+
+        summarize_btn.click(fn=_do_summarize, inputs=[session_state], outputs=[summary_md])
 
         # F26: управление местом — accordion (по умолчанию свёрнут).
         with gr.Accordion("Управление местом (outputs/ и cache/)", open=False):
@@ -961,6 +1093,72 @@ def build_ui() -> gr.Blocks:
                 preview_out, status_out,
                 txt_out, srt_out, vtt_out, json_out, md_out,
             ],
+        )
+
+        # F14: handlers истории встреч.
+        def _refresh_history() -> Any:
+            return gr.update(choices=_history_choices(), value=None)
+
+        def _open_meeting(selected: str | None) -> tuple[Any, ...]:
+            """Загружает .meta.json + .json со старой сессии в текущий state и таблицу.
+
+            Возвращает: (preview, status, txt_path, srt_path, vtt_path, json_path,
+            md_path, speakers_rows, session_state).
+            """
+            if not selected:
+                return ("", "Выбери встречу в списке.",
+                        None, None, None, None, None, [], {})
+            state = _load_session_from_disk(selected)
+            if not state:
+                return ("", f"Не удалось загрузить: {selected}",
+                        None, None, None, None, None, [], {})
+
+            aligned = _restore_aligned(state)
+            stem_path = Path(state["stem_path"])
+            meta = meta_mod.MeetingMeta.from_dict(state["meta"])
+            mapping = meta.display_name_mapping()
+            rows = _build_speaker_rows(aligned, mapping)
+            preview = exporters.to_txt(aligned, speakers_map=mapping or None)
+
+            # Файлы — собираем из meta.files если есть, иначе строим из stem.
+            def _path_or_none(suffix: str) -> str | None:
+                p = meta.files.get(suffix) if meta.files else None
+                if p and Path(p).exists():
+                    return p
+                guess = stem_path.with_suffix(f".{suffix}")
+                return str(guess) if guess.exists() else None
+
+            status = f"✓ Открыта встреча «{meta.title or stem_path.name}»"
+            return (
+                preview, status,
+                _path_or_none("txt"), _path_or_none("srt"), _path_or_none("vtt"),
+                _path_or_none("json"), _path_or_none("md"),
+                rows, state,
+            )
+
+        def _delete_meeting_handler(selected: str | None) -> tuple[str, Any]:
+            if not selected:
+                return ("Выбери встречу в списке.", gr.update())
+            n = history.delete_meeting(Path(selected))
+            return (
+                f"🗑 Удалено {n} файлов.",
+                gr.update(choices=_history_choices(), value=None),
+            )
+
+        history_refresh_btn.click(fn=_refresh_history, outputs=[history_dropdown])
+        history_open_btn.click(
+            fn=_open_meeting,
+            inputs=[history_dropdown],
+            outputs=[
+                preview_out, status_out,
+                txt_out, srt_out, vtt_out, json_out, md_out,
+                speakers_table, session_state,
+            ],
+        )
+        history_delete_btn.click(
+            fn=_delete_meeting_handler,
+            inputs=[history_dropdown],
+            outputs=[history_status, history_dropdown],
         )
 
     return demo

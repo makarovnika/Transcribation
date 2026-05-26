@@ -136,11 +136,11 @@
       "id": "F14-meeting-history",
       "title": "История встреч в UI",
       "priority": "P0",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F11-speaker-renaming", "F12-meeting-naming"],
       "spec": "См. TZ-v2-improvements.md §F14. src/history.py: scan_meetings()/load_meeting()/delete_meeting(). UI: Accordion с последними 5 встречами + 'показать все'. Поддержка legacy без .meta.json.",
       "verification": "tests/test_history.py (3 синтетических .meta.json → правильный порядок) + e2e: новый файл появляется без рестарта.",
-      "evidence": null
+      "evidence": "src/history.py: MeetingItem, scan_meetings (поддержка legacy transcript_<unix> через mtime fallback), format_relative_date ('сегодня'/'вчера'/'3д назад'/'DD MMM'), delete_meeting. 13 тестов test_history.py зелёные. app.py: gr.Dropdown с _history_choices, кнопки Обновить/Открыть/Удалить. _load_session_from_disk восстанавливает aligned из .json (берёт speaker_id для re-mapping). Pytest 126/126. E2E (открыть прошлую встречу из истории) — ждёт прогона."
     },
     {
       "id": "F15-audio-preprocessing",
@@ -216,11 +216,11 @@
       "id": "F19-ollama-summary",
       "title": "Локальная суммаризация через Ollama",
       "priority": "P1",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F11-speaker-renaming"],
       "spec": "См. TZ-v2-improvements.md §F19. src/summarize.py: HTTP POST http://127.0.0.1:11434/api/generate, model llama3.1:8b (env OLLAMA_MODEL). Парсинг JSON {tldr, decisions, action_items}. Fallback если Ollama не запущен.",
       "verification": "tests/test_summarize.py с mock httpx + e2e если Ollama стоит локально.",
-      "evidence": null
+      "evidence": "src/summarize.py: render_transcript (группирует подряд идущих + truncate >100kB), _extract_json (с поддержкой markdown-fences), parse_summary (нормализация action_items dict→str), summarize_transcript с понятными SummarizeError для ConnectError/Timeout/non-200. 16 тестов test_summarize.py с mock httpx. app.py: кнопка 'Получить резюме' + gr.Markdown, summary пишется в .meta.json.summary. Pytest 126/126. E2E (с реальным Ollama) — ждёт прогона."
     },
     {
       "id": "F20-word-timestamps",
