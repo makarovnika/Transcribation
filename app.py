@@ -316,27 +316,11 @@ def _run_pipeline(
             ),
             None, None, None, None, None, [], {},
         )
-    # Soft-block medium/turbo с диаризацией на 8 ГБ — мы это уже ловили jetsam'ом
-    # в реальных прогонах. medium (~1.5 ГБ MLX) + pyannote (~1.5 ГБ torch) +
-    # macOS service + браузер = пик >8 ГБ, jetsam убивает молча, без trace.
-    # Реальный фикс — sequential pipeline через subprocess (отдельная задача,
-    # см. taskcreate ниже). Пока — отказываем явно.
+    # Soft-block убран: Task #31 (subprocess pipeline) теперь освобождает
+    # MLX-память до запуска pyannote. medium + diarize на 8 ГБ Mac должно
+    # работать через _transcribe_via_subprocess.
     if _LOW_RAM and do_diarize and model_size in ("medium", "large-v3-turbo"):
-        return (
-            "",
-            (
-                f"⚠️ {model_size} + диаризация одновременно требует ~3.5+ ГБ "
-                f"только под модели — на {_TOTAL_RAM_GB:.1f} ГБ RAM macOS прибивает "
-                "процесс молча (jetsam).\n\n"
-                "Что можно сделать:\n"
-                f"  • выбери модель `small` + диаризация (помещается), или\n"
-                f"  • оставь `{model_size}` но **выключи диаризацию** (тогда метки "
-                "всех реплик будут `UNKNOWN`).\n\n"
-                "Полноценно `medium+diarize` будет возможно после реализации "
-                "sequential pipeline (subprocess для Whisper → unload → pyannote)."
-            ),
-            None, None, None, None, None, [], {},
-        )
+        log.info("%s+diarize на %.1f ГБ — через subprocess pipeline", model_size, _TOTAL_RAM_GB)
 
     # 0. Сохраняем токен, если просили — независимо от итога транскрибации.
     hf_token = hf_token_input.strip() if hf_token_input else None
@@ -429,20 +413,41 @@ def _run_pipeline(
         # Транскрибация
         lang_arg: str | None
         lang_arg = None if language_choice == "auto" else language_choice
-        ws_iter, meta = transcription.transcribe(
-            prepared.path,
-            model_size=model_size,  # type: ignore[arg-type]
-            language=lang_arg,
-            audio_duration=prepared.duration_sec,
-            progress_callback=_make_progress(0.05, 0.7, "Транскрибация"),
-            cache_dir=CACHE_DIR,    # промежуточный дамп + resume на сбое
-            word_timestamps=word_timestamps,  # F20
-        )
-        ws_segments = list(ws_iter)  # потребляем итератор полностью
-        status_msgs.append(
-            f"[ok] транскрибация: {len(ws_segments)} сегментов, "
-            f"язык={meta.detected_language or 'n/a'}"
-        )
+
+        # F31 (Task #31): для диаризации запускаем транскрибацию в отдельном
+        # Python-процессе. После его смерти MLX-веса полностью освобождаются —
+        # это единственный способ на 8 ГБ Mac уместить medium + pyannote.
+        # Без диаризации остаёмся в одном процессе (быстрее, меньше I/O).
+        if do_diarize and _LOW_RAM:
+            log.info("subprocess pipeline: запуск whisper в отдельном процессе")
+            progress(0.05, desc="Транскрибация в subprocess (для экономии RAM)…")
+            ws_segments, meta = _transcribe_via_subprocess(
+                audio_path=prepared.path,
+                model_size=model_size,
+                language=lang_arg,
+                duration_sec=prepared.duration_sec,
+                word_timestamps=word_timestamps,
+                progress=progress,
+            )
+            status_msgs.append(
+                f"[ok] транскрибация (subprocess): {len(ws_segments)} сегментов, "
+                f"язык={meta.detected_language or 'n/a'}"
+            )
+        else:
+            ws_iter, meta = transcription.transcribe(
+                prepared.path,
+                model_size=model_size,  # type: ignore[arg-type]
+                language=lang_arg,
+                audio_duration=prepared.duration_sec,
+                progress_callback=_make_progress(0.05, 0.7, "Транскрибация"),
+                cache_dir=CACHE_DIR,    # промежуточный дамп + resume на сбое
+                word_timestamps=word_timestamps,  # F20
+            )
+            ws_segments = list(ws_iter)  # потребляем итератор полностью
+            status_msgs.append(
+                f"[ok] транскрибация: {len(ws_segments)} сегментов, "
+                f"язык={meta.detected_language or 'n/a'}"
+            )
 
         # === Освобождение памяти перед диаризацией (нужно для 8-16 ГБ Mac) ===
         # mlx-whisper держит модель в Metal-кэше между вызовами, и если сразу
@@ -679,6 +684,105 @@ def _load_session_from_disk(stem_path_str: str) -> dict[str, Any] | None:
         "aligned": aligned_dicts,
         "meta": m.to_dict(),
     }
+
+
+def _transcribe_via_subprocess(
+    *,
+    audio_path: Path,
+    model_size: str,
+    language: str | None,
+    duration_sec: float,
+    word_timestamps: bool,
+    progress: gr.Progress,
+) -> tuple[list[transcription.Segment], transcription.TranscriptionMeta]:
+    """Запустить транскрибацию в отдельном Python-процессе (Task #31).
+
+    Возвращает (segments, meta) — тот же контракт что у transcription.transcribe(),
+    но память whisper полностью освобождается до возврата управления.
+
+    Прогресс: читаем stdout subprocess'а построчно, ищем '[progress] ...' и
+    обновляем Gradio progress.
+    """
+    import subprocess
+    import tempfile
+
+    worker = Path(__file__).parent / "bin" / "_transcribe_worker.py"
+    if not worker.exists():
+        raise RuntimeError(f"worker не найден: {worker}")
+
+    # Output JSON во временной папке. После чтения удаляем.
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".result.json", delete=False, encoding="utf-8",
+    ) as f:
+        out_path = Path(f.name)
+
+    cmd = [
+        sys.executable, "-u", str(worker),
+        "--audio", str(audio_path),
+        "--model", model_size,
+        "--language", language or "auto",
+        "--chunk-seconds", str(transcription.DEFAULT_CHUNK_SECONDS),
+        "--cache-dir", str(CACHE_DIR),
+        "--word-timestamps", "1" if word_timestamps else "0",
+        "--output", str(out_path),
+    ]
+    log.info("subprocess cmd: %s", " ".join(cmd))
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        # Читаем stdout по строкам, ищем прогресс. proc.stdout не None — PIPE.
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line.startswith("[progress]"):
+                # На subprocess не передаём audio_duration → ETA по количеству
+                # сегментов условный. Показываем в desc как есть.
+                progress(0.4, desc=f"Транскрибация: {line[10:].strip()}")
+            elif line.startswith("[done]"):
+                progress(0.7, desc="Транскрибация: готово")
+            else:
+                log.debug("subprocess: %s", line)
+
+        rc = proc.wait()
+        stderr_text = proc.stderr.read() if proc.stderr else ""
+
+        if rc != 0:
+            raise RuntimeError(
+                f"transcribe worker упал (rc={rc}): "
+                f"{stderr_text[:1000] if stderr_text else 'no stderr'}"
+            )
+
+        # Парсим результат.
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        if "error" in data:
+            raise RuntimeError(f"transcribe worker error: {data['error']}")
+
+        segments = [
+            transcription._segment_from_dict(s) for s in data.get("segments", [])
+        ]
+        meta = transcription.TranscriptionMeta(
+            detected_language=data.get("language"),
+            duration=data.get("duration"),
+            model_size=data.get("model_size", model_size),
+            chunks_total=int(data.get("chunks_total", 0)),
+            resumed_from_chunk=int(data.get("resumed_from_chunk", 0)),
+        )
+        log.info(
+            "subprocess pipeline done: %d сегментов, язык=%s",
+            len(segments), meta.detected_language,
+        )
+        return segments, meta
+
+    finally:
+        # Чистим временный файл.
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _render_storage_status() -> str:
