@@ -24,19 +24,16 @@ DST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 
 # Используем шаблон с маркерами __HOME__ / __PROJECT__ — это даёт переносимость
 # между машинами без правки plist под конкретный username.
-# Если шаблона нет (старая установка) — fallback на готовый plist рядом.
-if [ -f "$TEMPLATE" ]; then
-  echo "[..] рендерю plist из шаблона (HOME=${HOME}, PROJECT=${PROJECT_DIR})"
-  RENDERED="$(mktemp /tmp/transcriber.plist.XXXXXX)"
-  sed -e "s|__HOME__|${HOME}|g" -e "s|__PROJECT__|${PROJECT_DIR}|g" \
-    "$TEMPLATE" > "$RENDERED"
-  SRC="$RENDERED"
-elif [ -f "${BIN_DIR}/${LABEL}.plist" ]; then
-  SRC="${BIN_DIR}/${LABEL}.plist"
-else
-  echo "ERROR: ни шаблона ($TEMPLATE), ни plist не найдено"
+# Статический plist убран — единственный источник правды теперь template.
+if [ ! -f "$TEMPLATE" ]; then
+  echo "ERROR: шаблон plist не найден: $TEMPLATE"
   exit 1
 fi
+echo "[..] рендерю plist из шаблона (HOME=${HOME}, PROJECT=${PROJECT_DIR})"
+RENDERED="$(mktemp /tmp/transcriber.plist.XXXXXX)"
+sed -e "s|__HOME__|${HOME}|g" -e "s|__PROJECT__|${PROJECT_DIR}|g" \
+  "$TEMPLATE" > "$RENDERED"
+SRC="$RENDERED"
 
 # Если уже загружен — снимаем, иначе load молча ничего не сделает (или ругнётся).
 if launchctl list 2>/dev/null | grep -q "$LABEL"; then

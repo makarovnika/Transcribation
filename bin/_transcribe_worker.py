@@ -67,9 +67,35 @@ def main() -> int:
     args = parser.parse_args()
 
     # Импорт transcribe — внутрь main, чтобы при argparse-ошибке не тянуть тяжесть.
-    from src.transcription import transcribe
+    # Также — проверим что mlx_whisper доступен (subprocess может быть запущен
+    # не из venv, например с системным python — тогда понятная ошибка лучше
+    # чем загадочный ImportError позже).
+    try:
+        from src.transcription import transcribe
+    except ImportError as e:
+        print(f"[error] не могу импортировать transcribe: {e}", file=sys.stderr, flush=True)
+        print("[error] subprocess запущен не из venv? sys.executable=" + sys.executable,
+              file=sys.stderr, flush=True)
+        return 1
 
     try:
+        # progress_callback в transcribe принимает (stage, fraction, note).
+        # Мы используем его, чтобы понять когда заканчивается чанк, и печатаем
+        # '[chunk] idx/total' — родитель парсит это для Gradio progress.
+        chunks_total_holder = {"value": 0}
+        last_chunk_idx = {"value": -1}
+
+        def _progress_cb(stage: str, fraction: float, note: str) -> None:
+            # transcription.transcribe вызывает callback с stage='transcribe_chunk_done'
+            # после каждого чанка (см. src/transcription.py). Мы используем это
+            # как сигнал «чанк готов». chunks_total получим из meta после старта.
+            if stage == "transcribe_chunk_done":
+                total = chunks_total_holder["value"] or 1
+                idx = int(round(fraction * total))
+                if idx > last_chunk_idx["value"]:
+                    last_chunk_idx["value"] = idx
+                    print(f"[chunk] {idx}/{total}", flush=True)
+
         ws_iter, meta = transcribe(
             args.audio,
             model_size=args.model,  # type: ignore[arg-type]
@@ -77,7 +103,10 @@ def main() -> int:
             chunk_seconds=args.chunk_seconds,
             cache_dir=args.cache_dir,
             word_timestamps=bool(args.word_timestamps),
+            progress_callback=_progress_cb,
         )
+        # Теперь когда meta готова — знаем сколько всего чанков.
+        chunks_total_holder["value"] = meta.chunks_total
 
         segments = []
         for s in ws_iter:
@@ -90,11 +119,6 @@ def main() -> int:
             if s.words:
                 seg_dict["words"] = [asdict(w) for w in s.words]
             segments.append(seg_dict)
-            # Прогресс — каждое N сегментов в stdout, чтобы родитель видел.
-            # Реальная гранулярность по чанкам через progress_callback была бы лучше,
-            # но callback в subprocess неудобно. Делаем простую инкрементацию.
-            if len(segments) % 10 == 0:
-                print(f"[progress] {len(segments)} сегментов", flush=True)
 
         result = {
             "segments": segments,

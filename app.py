@@ -361,29 +361,28 @@ def _run_pipeline(
         h, m = divmod(m, 60)
         return f"~{h}ч {m:02d}м"
 
-    # F13: 4-этапная прогресс-строка ("✓ Подготовка · ● Whisper · ○ Диаризация · ○ Экспорт").
-    # Текущий этап = ● (точка), пройденные = ✓, будущие = ○. Эта строка пишется
-    # в начало desc прогресс-бара перед label/note/ETA — чтобы пользователь видел
-    # «где мы сейчас» в общей цепочке.
-    STAGE_NAMES = ["Подготовка", "Whisper", "Диаризация", "Экспорт"]
+    # F13: прогресс-строка с этапами. Динамически — без диаризации убираем
+    # этап «Диаризация» из строки и сдвигаем диапазон экспорта, чтобы не было
+    # «○ Диаризация» которая никогда не загорится.
+    if do_diarize:
+        stage_names = ["Подготовка", "Whisper", "Диаризация", "Экспорт"]
+        # Границы соответствуют диапазонам в _make_progress (см. ниже):
+        # prepare 0..0.05, transcribe 0.05..0.7, diarize 0.7..0.95, export 0.95..1.
+        stage_bounds = [0.05, 0.7, 0.95, 1.01]
+    else:
+        stage_names = ["Подготовка", "Whisper", "Экспорт"]
+        # Без диаризации transcribe растягивается до 0.9, export 0.9..1.
+        stage_bounds = [0.05, 0.9, 1.01]
 
     def _stage_index_for(value: float) -> int:
-        """По общей доле прогресса определяет текущий этап (0..3).
-
-        Границы соответствуют диапазонам, которые мы передаём в _make_progress:
-        prepare 0..0.05, transcribe 0.05..0.7, diarize 0.7..0.95, export 0.95..1.0.
-        """
-        if value < 0.05:
-            return 0
-        if value < 0.7:
-            return 1
-        if value < 0.95:
-            return 2
-        return 3
+        for i, hi in enumerate(stage_bounds):
+            if value < hi:
+                return i
+        return len(stage_names) - 1
 
     def _stages_line(current: int) -> str:
         parts: list[str] = []
-        for i, name in enumerate(STAGE_NAMES):
+        for i, name in enumerate(stage_names):
             if i < current:
                 parts.append(f"✓ {name}")
             elif i == current:
@@ -837,8 +836,10 @@ TRANSCRIPT_CSS_JS = """
     if (!t) return;
     const sec = parseFloat(t.dataset.sec);
     if (isNaN(sec)) return;
-    // Берём первый <audio> на странице — это gr.Audio плеер.
-    const audio = document.querySelector('audio');
+    // Узкий селектор: <audio> внутри блока #audio-player, не первый попавшийся
+    // (микрофонный gr.Audio тоже создаёт <audio>-элемент на странице).
+    const audio = document.querySelector('#audio-player audio')
+              || document.querySelector('audio');
     if (audio) {
       audio.currentTime = sec;
       audio.play().catch(() => {/* пользователь не interacted ещё — ОК */});
@@ -938,31 +939,57 @@ def _transcribe_via_subprocess(
     log.info("subprocess cmd: %s", " ".join(cmd))
 
     try:
+        # stderr=STDOUT: объединяем оба stream'а в один, читаем последовательно.
+        # Раньше было stderr=PIPE без чтения параллельно — на больших stderr
+        # (faster-whisper VAD-логи, torch warnings) pipe-buffer ~64KB переполнялся,
+        # worker блокировался на write, мы блокировались на read → deadlock.
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
         )
-        # Читаем stdout по строкам, ищем прогресс. proc.stdout не None — PIPE.
         assert proc.stdout is not None
+        # Накапливаем последние строки для error-сообщения, если процесс упадёт.
+        recent_lines: list[str] = []
+        max_recent = 50
+        # Прогресс по чанкам — worker печатает '[chunk] idx/total'. Считаем долю.
         for line in proc.stdout:
             line = line.rstrip()
-            if line.startswith("[progress]"):
-                # На subprocess не передаём audio_duration → ETA по количеству
-                # сегментов условный. Показываем в desc как есть.
+            if not line:
+                continue
+            recent_lines.append(line)
+            if len(recent_lines) > max_recent:
+                recent_lines.pop(0)
+
+            if line.startswith("[chunk]"):
+                # Формат: '[chunk] 3/6'
+                try:
+                    rest = line.split(" ", 1)[1]
+                    idx_str, total_str = rest.split("/", 1)
+                    idx = int(idx_str)
+                    total = max(1, int(total_str))
+                    frac = idx / total
+                    # transcribe-окно прогресса = 0.05..0.7.
+                    progress(0.05 + (0.7 - 0.05) * frac,
+                             desc=f"Транскрибация: чанк {idx}/{total}")
+                except (ValueError, IndexError):
+                    log.debug("subprocess malformed chunk: %s", line)
+            elif line.startswith("[progress]"):
+                # Старый формат на случай если кто-то его шлёт — оставим как fallback.
                 progress(0.4, desc=f"Транскрибация: {line[10:].strip()}")
             elif line.startswith("[done]"):
                 progress(0.7, desc="Транскрибация: готово")
+            elif line.startswith("[error]"):
+                log.warning("subprocess error: %s", line[7:].strip())
             else:
                 log.debug("subprocess: %s", line)
 
         rc = proc.wait()
-        stderr_text = proc.stderr.read() if proc.stderr else ""
 
         if rc != 0:
+            tail = "\n".join(recent_lines[-20:])
             raise RuntimeError(
-                f"transcribe worker упал (rc={rc}): "
-                f"{stderr_text[:1000] if stderr_text else 'no stderr'}"
+                f"transcribe worker упал (rc={rc}):\n{tail[:1500] if tail else 'no output'}"
             )
 
         # Парсим результат.
@@ -1321,6 +1348,7 @@ def build_ui() -> gr.Blocks:
                     type="filepath",
                     interactive=False,
                     visible=False,  # покажем когда загрузят файл
+                    elem_id="audio-player",  # F17: узкий селектор для JS click-to-seek
                 )
                 status_out = gr.Textbox(label="Статус", lines=6, interactive=False)
 

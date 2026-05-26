@@ -130,7 +130,7 @@
       "depends_on": ["F08-gradio-ui"],
       "spec": "См. TZ-v2-improvements.md §F13. gr.themes.Soft(primary_hue='indigo'), reshape layout по outputs/ui-mockup.html. ETA в прогрессе через скользящее среднее. Состояния empty/error/success как отдельные плашки.",
       "verification": "Скриншоты до/после в claude-progress.md. E2E на коротком файле — все этапы прогресса видны.",
-      "evidence": "Сделано: gr.themes.Soft(primary_hue='indigo', neutral_hue='slate', font=Inter) с fallback на дефолт. ETA через elapsed/value*(1-value), формат '~Xм YYс'. Empty-state hint markdown над status. НЕ сделано: полный reshape layout по mockup — мокапа в проекте нет (outputs/ui-mockup.html отсутствует). Все 4 этапа прогресса одной строкой и Tabs для Резюме/Action items — требует F19 (Ollama). E2E — пользователь увидит новую тему при следующем restart."
+      "evidence": "Сделано: gr.themes.Soft(primary_hue='indigo', neutral_hue='slate') (после фидбэка пользователя dark убран — было нечитаемо). ETA через elapsed/value*(1-value), формат '~Xм YYс'. Прогресс с 4-этапной строкой '✓ Подготовка · ● Whisper · ○ Диаризация · ○ Экспорт' — динамические этапы: без диаризации показываем 3 этапа, без призраков. Empty-state hint markdown над status. Полный reshape по mockup не делал — мокапа в проекте нет."
     },
     {
       "id": "F14-meeting-history",
@@ -200,7 +200,7 @@
       "depends_on": ["F11-speaker-renaming"],
       "spec": "См. TZ-v2-improvements.md §F17. gr.HTML с кликабельными .time (data-sec). Inline JS перематывает audio. Подсветка активного сегмента на timeupdate.",
       "verification": "E2E: клик на таймкод второй реплики → плеер перематывает. Проверить в Chrome и Safari.",
-      "evidence": "Сделано: gr.Audio плеер появляется при загрузке файла (visible toggle). Можно прослушать запись до старта транскрибации. НЕ сделано: кликабельные таймкоды в превью (требует переделки на gr.HTML + inline JS, что значительно меняет рендер preview_out)."
+      "evidence": "F17 ПОЛНЫЙ. _render_transcript_html строит <div id='transcript'> с .turn/.speaker/.time/.text. TRANSCRIPT_CSS_JS — один глобальный <style>+<script> через делегирование клика. По клику на .time: document.querySelector('#audio-player audio').currentTime = sec + play(). gr.Audio получил elem_id='audio-player' для узкого селектора. Preview переведён с Textbox на gr.HTML. 132/132 pytest, UI HTTP 200."
     },
     {
       "id": "F18-transcript-search",
@@ -210,7 +210,7 @@
       "depends_on": ["F17-audio-player"],
       "spec": "См. TZ-v2-improvements.md §F18. gr.Textbox + JS-фильтрация .turn. Подсветка совпадений mark. Счётчик найденного.",
       "verification": "Ручной: ввести слово → не-совпадающие реплики скрыты, совпадения подсвечены.",
-      "evidence": "Сделано: gr.Textbox 'Поиск в транскрипте' + Python-фильтр строк превью по подстроке. Счётчик 'Найдено: N строк'. НЕ сделано: <mark>-подсветка матчей внутри строк (требует HTML render). Подсветка средствами Markdown через ** или ` не работает в preview_out (textbox)."
+      "evidence": "F18 ПОЛНЫЙ. window.__transcriberSearch(query) в TRANSCRIPT_CSS_JS: .turn без матча → class t-hidden (display:none); матч в .text оборачивается в <mark> (оригинал в data-original для restore). Счётчик 'Найдено: N реплик' в #transcript-search-count. search_in.change с js='...' — чисто клиентский callback без round-trip Python. Pytest 132/132."
     },
     {
       "id": "F19-ollama-summary",
