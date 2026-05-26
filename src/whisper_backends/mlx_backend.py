@@ -16,11 +16,14 @@ from typing import Any
 # Маппинг названия размера на MLX-репозиторий с конвертированными весами.
 # Все веса в mlx-community формате (npz + config.json).
 _MLX_REPO_BY_MODEL: dict[str, str] = {
-    "tiny":     "mlx-community/whisper-tiny-mlx",
-    "base":     "mlx-community/whisper-base-mlx",
-    "small":    "mlx-community/whisper-small-mlx",
-    "medium":   "mlx-community/whisper-medium-mlx",
-    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "tiny":           "mlx-community/whisper-tiny-mlx",
+    "base":           "mlx-community/whisper-base-mlx",
+    "small":          "mlx-community/whisper-small-mlx",
+    "medium":         "mlx-community/whisper-medium-mlx",
+    "large-v3":       "mlx-community/whisper-large-v3-mlx",
+    # F21: turbo — облегчённый decoder поверх large-v3 encoder. Качество
+    # ~ large-v3, скорость в 3-5× быстрее. Веса ~1.5 ГБ против 3 ГБ у large-v3.
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
 
 

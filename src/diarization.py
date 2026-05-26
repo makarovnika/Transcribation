@@ -120,9 +120,41 @@ def _cache_key(num_speakers: int | None, min_s: int | None, max_s: int | None) -
     return f"n{num_speakers or 0}_min{min_s or 0}_max{max_s or 0}"
 
 
-def _diar_cache_path(cache_dir: Path, fingerprint: str, params: str) -> Path:
+def _pyannote_version() -> str:
+    """F28: версия pyannote-pipeline для инвалидации старого кэша после обновлений.
+
+    Берём pyannote.audio.__version__ — если схема embeddings/кластеризации
+    поменяется в новом релизе, старые .json несовместимы. Дополнительно мешаем
+    PIPELINE_NAME — если в будущем переключимся на другой pipeline (например,
+    diarization-3.2), старый кэш не подхватится.
+
+    Возвращаемая строка короткая (sha1[:8]) — чтобы имя файла оставалось читаемым.
+    """
+    try:
+        import pyannote.audio
+        ver = str(pyannote.audio.__version__)
+    except (ImportError, AttributeError):
+        ver = "unknown"
+    h = hashlib.sha1(f"{PIPELINE_NAME}@{ver}".encode()).hexdigest()[:8]
+    return h
+
+
+def _diar_cache_path(
+    cache_dir: Path,
+    fingerprint: str,
+    params: str,
+    *,
+    pipeline_version: str | None = None,
+) -> Path:
+    """Путь к JSON-кэшу диаризации.
+
+    F28: pipeline_version (хэш от PIPELINE_NAME@version) включён в имя файла,
+    чтобы после апгрейда pyannote старый кэш не reused. По умолчанию
+    вычисляется через _pyannote_version() — но в тестах можно передать явно.
+    """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir / f"diar_{fingerprint}_{params}.json"
+    ver = pipeline_version if pipeline_version is not None else _pyannote_version()
+    return cache_dir / f"diar_{fingerprint}_{ver}_{params}.json"
 
 
 def _load_diar_cache(path: Path) -> list[SpeakerSegment] | None:

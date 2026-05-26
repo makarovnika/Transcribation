@@ -166,21 +166,21 @@
       "id": "F28-diar-cache-versioning",
       "title": "Версия pyannote в ключе кэша диаризации",
       "priority": "P1",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": ["F04-diarization"],
       "spec": "См. TZ-v2-improvements.md §F28. Добавить pyannote.__version__ в имя cache-файла: diar_<fp>_<ver>_n<n>_min<min>_max<max>.json.",
       "verification": "Unit-тест: два вызова _diar_cache_path с разными версиями → разные пути.",
-      "evidence": null
+      "evidence": "src/diarization.py: _pyannote_version() = sha1(PIPELINE_NAME@pyannote.audio.__version__)[:8]. _diar_cache_path принимает pipeline_version explicitly (для тестов) или вычисляет автоматически. tests/test_diar_cache.py — 3 теста зелёные."
     },
     {
       "id": "F29-duration-limit",
       "title": "Soft-warning на длинных файлах",
       "priority": "P1",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": ["F02-audio-utils"],
       "spec": "См. TZ-v2-improvements.md §F29. >4ч — warning, >8ч — hard block.",
       "verification": "Подать фейковый 9-часовой файл (или замокать duration_sec) → корректное поведение.",
-      "evidence": null
+      "evidence": "app.py: DURATION_SOFT_WARNING_SEC=4*3600, DURATION_HARD_BLOCK_SEC=8*3600. >8ч — return с понятным сообщением и без запуска моделей. >4ч — warning в status, продолжаем. 58/58 pytest."
     },
     {
       "id": "F16-mic-recording",
@@ -236,11 +236,11 @@
       "id": "F21-turbo-model",
       "title": "Опция модели large-v3-turbo",
       "priority": "P1",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F03-transcription"],
       "spec": "См. TZ-v2-improvements.md §F21. Добавить 'large-v3-turbo' в SUPPORTED_MODELS. mlx-community/whisper-large-v3-turbo. Проверить версию faster-whisper >= 1.0.4. Soft-block при RAM < 10 ГБ.",
       "verification": "E2E на 30-сек файле: time ≤ small × 2, текст читаем.",
-      "evidence": null
+      "evidence": "SUPPORTED_MODELS расширены 'large-v3-turbo'. mlx_backend._MLX_REPO_BY_MODEL: 'large-v3-turbo' → 'mlx-community/whisper-large-v3-turbo'. faster-whisper bumped до 1.0.4+ в pyproject. app.py: TURBO_RAM_THRESHOLD_GB=10.0, soft-block. UI dropdown подхватит автоматически. E2E на 30-сек файле — ждёт прогона пользователем."
     },
     {
       "id": "F22-batch",

@@ -42,9 +42,9 @@ DEFAULT_CHUNK_SECONDS = 600
 # Целевая частота дискретизации (соответствует prepare_audio()).
 TARGET_SAMPLE_RATE = 16_000
 
-WhisperModelName = Literal["tiny", "base", "small", "medium", "large-v3"]
+WhisperModelName = Literal["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
 SUPPORTED_MODELS: tuple[WhisperModelName, ...] = (
-    "tiny", "base", "small", "medium", "large-v3",
+    "tiny", "base", "small", "medium", "large-v3", "large-v3-turbo",
 )
 DEFAULT_MODEL: WhisperModelName = "large-v3"
 

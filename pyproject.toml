@@ -11,7 +11,7 @@ readme = "README.md"
 #   в 5–8 раз для long-form. На Windows/Linux MLX не существует.
 # Выбор бэкенда в рантайме делает src/device.py (см. get_whisper_backend()).
 dependencies = [
-    "faster-whisper>=1.0.3",
+    "faster-whisper>=1.0.4",  # F21: 1.0.4+ нативно понимает large-v3-turbo
     "mlx-whisper>=0.4 ; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "pyannote.audio>=3.3.0",
     "gradio>=4.40.0",

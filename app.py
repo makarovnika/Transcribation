@@ -189,6 +189,16 @@ def _total_ram_gb() -> float:
 # 12 ГБ — комфортный минимум для large-v3 + диаризации (по ТЗ §7 рекомендовано 16+).
 LOW_RAM_THRESHOLD_GB = 12.0
 
+# F21: для turbo-модели порог ниже — она легче large-v3, но не настолько как small.
+TURBO_RAM_THRESHOLD_GB = 10.0
+
+# F29: лимиты по длительности файла.
+# Soft warning — pyannote держит wav в RAM целиком, на 4+ ч риск OOM растёт.
+# Hard block — на 8+ ч мы не видели ни одной разумной встречи; почти наверняка
+# это ошибка (зацикленная запись, перепутанный файл).
+DURATION_SOFT_WARNING_SEC = 4 * 3600
+DURATION_HARD_BLOCK_SEC = 8 * 3600
+
 _TOTAL_RAM_GB = _total_ram_gb()
 _LOW_RAM = 0 < _TOTAL_RAM_GB < LOW_RAM_THRESHOLD_GB
 
@@ -236,15 +246,26 @@ def _run_pipeline(
                 f"только под веса.\nНа машинах <{LOW_RAM_THRESHOLD_GB:.0f} ГБ macOS "
                 "jetsam убьёт процесс сразу после загрузки модели.\n\n"
                 "Что делать:\n"
-                "  • выбери модель `small` или `medium`, или\n"
+                "  • выбери модель `small`, `medium` или `large-v3-turbo`, или\n"
                 "  • выключи диаризацию и перезапусти приложение, чтобы освободить ~1.5 ГБ "
                 "под pyannote, или\n"
                 "  • закрой Chrome/IDE и попробуй `medium`."
             ),
             None, None, None, None, None, [], {},
         )
-    if _LOW_RAM and do_diarize and model_size == "medium":
-        log.warning("medium+diarize on low RAM (%.1f GB) — risky", _TOTAL_RAM_GB)
+    # F21: turbo тоже тяжёлая, но легче large-v3. Порог 10 ГБ.
+    if 0 < _TOTAL_RAM_GB < TURBO_RAM_THRESHOLD_GB and model_size == "large-v3-turbo":
+        return (
+            "",
+            (
+                f"⚠️ У тебя {_TOTAL_RAM_GB:.1f} ГБ RAM. large-v3-turbo требует "
+                f"~{TURBO_RAM_THRESHOLD_GB:.0f} ГБ свободной памяти.\n"
+                "Возьми `small` или `medium`."
+            ),
+            None, None, None, None, None, [], {},
+        )
+    if _LOW_RAM and do_diarize and model_size in ("medium", "large-v3-turbo"):
+        log.warning("%s+diarize on low RAM (%.1f GB) — risky", model_size, _TOTAL_RAM_GB)
 
     # 0. Сохраняем токен, если просили — независимо от итога транскрибации.
     hf_token = hf_token_input.strip() if hf_token_input else None
@@ -287,6 +308,28 @@ def _run_pipeline(
             f"[ok] аудио {prepared.duration_sec:.1f}s "
             f"({prepared.sample_rate} Hz, {prepared.channels} ch)"
         )
+
+        # F29: проверка длительности.
+        # Hard block — точно отказываем (вероятно ошибка пользователя).
+        # Soft warning — добавляем строку в статус, продолжаем работу.
+        if prepared.duration_sec > DURATION_HARD_BLOCK_SEC:
+            hours = prepared.duration_sec / 3600
+            return (
+                "",
+                (
+                    f"⛔ Файл {hours:.1f} ч — это больше hard-limit "
+                    f"({DURATION_HARD_BLOCK_SEC / 3600:.0f} ч).\n"
+                    "Скорее всего это ошибка (зацикленная запись или перепутанный файл).\n"
+                    "Если это реально нужная запись — разбей её на куски через ffmpeg."
+                ),
+                None, None, None, None, None, [], {},
+            )
+        if prepared.duration_sec > DURATION_SOFT_WARNING_SEC:
+            hours = prepared.duration_sec / 3600
+            status_msgs.append(
+                f"[warn] длинный файл ({hours:.1f} ч) — pyannote может упасть по памяти "
+                f"на {_TOTAL_RAM_GB:.0f} ГБ RAM"
+            )
 
         # Транскрибация
         lang_arg: str | None
