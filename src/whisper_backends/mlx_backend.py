@@ -41,11 +41,18 @@ def transcribe_chunk(
     handle: str,
     chunk_arr: Any,
     language: str | None,
+    *,
+    word_timestamps: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Транскрибировать один чанк (np.ndarray float32 16 kHz mono).
 
+    Args:
+        word_timestamps: F20 — если True, в каждом сегменте появится массив
+            words с start/end/text/probability для отдельных слов.
+            Замедляет inference на 5-10%, плюс +RAM на word matrix.
+
     Returns:
-        segments — список словарей с полями start/end/text (секунды от начала чанка),
+        segments — список словарей с полями start/end/text (и words если включено),
         detected_language — код языка ('ru', 'en', ...) или None.
     """
     # Ленивый импорт — тяжёлый, не таскать в момент import модуля.
@@ -57,16 +64,31 @@ def transcribe_chunk(
         language=language,
         condition_on_previous_text=False,  # критично против галлюцинаций на длинных файлах
         verbose=None,  # не печатать в stdout
+        word_timestamps=word_timestamps,  # F20
     )
 
     segments_raw = result.get("segments", []) or []
-    segments = [
-        {
+    segments: list[dict[str, Any]] = []
+    for seg in segments_raw:
+        seg_dict: dict[str, Any] = {
             "start": float(seg["start"]),
             "end": float(seg["end"]),
             "text": str(seg.get("text", "")).strip(),
         }
-        for seg in segments_raw
-    ]
+        if word_timestamps:
+            # mlx-whisper выдаёт words: list of {word, start, end, probability}.
+            # Нормализуем под наш формат (text вместо word).
+            words = seg.get("words") or []
+            seg_dict["words"] = [
+                {
+                    "start": float(w.get("start", 0.0)),
+                    "end": float(w.get("end", 0.0)),
+                    "text": str(w.get("word", w.get("text", ""))).strip(),
+                    "probability": (float(w["probability"])
+                                    if w.get("probability") is not None else None),
+                }
+                for w in words
+            ]
+        segments.append(seg_dict)
     detected = result.get("language")
     return segments, detected

@@ -55,6 +55,8 @@ from src import (
 # meta переименован в meta_mod, чтобы не конфликтовать с локальной переменной meta
 # (TranscriptionMeta), которую возвращает transcription.transcribe().
 from src import meta as meta_mod
+from src import naming  # F12: slug + build_stem
+from src import rotation  # F26: ротация outputs/cache
 from src import speakers as speakers_mod
 
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
@@ -131,9 +133,14 @@ def _write_all_exports(
     detected_language: str | None,
     title_for_md: str,
     speakers_map: dict[str, str] | None = None,
+    md_frontmatter: dict[str, Any] | None = None,  # F23
 ) -> tuple[Path, Path, Path, Path, Path]:
     """Записывает все 5 файлов одним вызовом. Используется и при первом экспорте,
-    и при повторном после переименования спикеров (F11 §2)."""
+    и при повторном после переименования спикеров (F11 §2).
+
+    md_frontmatter (F23): YAML frontmatter для MD-экспорта. Поля title/date/
+    duration_sec/model/language. Если None — MD без frontmatter (legacy).
+    """
     txt_path = exporters.write_txt(aligned, base.with_suffix(".txt"), speakers_map=speakers_map)
     srt_path = exporters.write_srt(aligned, base.with_suffix(".srt"), speakers_map=speakers_map)
     vtt_path = exporters.write_vtt(aligned, base.with_suffix(".vtt"), speakers_map=speakers_map)
@@ -145,6 +152,7 @@ def _write_all_exports(
     md_path = exporters.write_md(
         aligned, base.with_suffix(".md"),
         title=title_for_md, speakers_map=speakers_map,
+        frontmatter=md_frontmatter,
     )
     return txt_path, srt_path, vtt_path, json_path, md_path
 
@@ -208,6 +216,26 @@ DEFAULT_MODEL_FOR_UI = "small" if _LOW_RAM else transcription.DEFAULT_MODEL
 DEFAULT_DIARIZE_FOR_UI = not _LOW_RAM
 
 
+# F26: при старте app.py делаем мягкую уборку устаревших групп.
+# По дефолту храним 60 дней / 100 групп. Если пользователь хочет другое —
+# поправит DEFAULT_RETENTION_DAYS/DEFAULT_MAX_ENTRIES в src/rotation.py.
+def _startup_cleanup() -> None:
+    try:
+        for d in (OUTPUTS_DIR, CACHE_DIR):
+            res = rotation.cleanup_outputs(d)
+            if res.removed_groups:
+                log.info(
+                    "rotation %s: removed %d groups (%s)",
+                    d.name, res.removed_groups, rotation.human_size(res.removed_bytes),
+                )
+    except Exception as e:
+        # Уборка не должна валить запуск сервиса.
+        log.warning("startup cleanup failed (non-fatal): %s", e)
+
+
+_startup_cleanup()
+
+
 # ---------- Pipeline ----------
 
 def _run_pipeline(
@@ -218,6 +246,9 @@ def _run_pipeline(
     language_choice: str,
     hf_token_input: str,
     save_token: bool,
+    meeting_title: str = "",   # F12: название встречи для slug
+    denoise: bool = False,     # F15: шумоподавление + нормализация громкости
+    word_timestamps: bool = False,  # F20: word-level timestamps в JSON
     progress: gr.Progress = gr.Progress(),
 ) -> tuple[str, str, str | None, str | None, str | None, str | None, str | None]:
     """Возвращает кортеж для gr.outputs:
@@ -303,10 +334,11 @@ def _run_pipeline(
 
     try:
         progress(0.0, desc="Подготовка аудио…")
-        prepared = audio_utils.prepare_audio(audio_file)
+        prepared = audio_utils.prepare_audio(audio_file, denoise=denoise)
+        denoise_note = " + loudnorm/afftdn" if denoise else ""
         status_msgs.append(
             f"[ok] аудио {prepared.duration_sec:.1f}s "
-            f"({prepared.sample_rate} Hz, {prepared.channels} ch)"
+            f"({prepared.sample_rate} Hz, {prepared.channels} ch){denoise_note}"
         )
 
         # F29: проверка длительности.
@@ -341,6 +373,7 @@ def _run_pipeline(
             audio_duration=prepared.duration_sec,
             progress_callback=_make_progress(0.05, 0.7, "Транскрибация"),
             cache_dir=CACHE_DIR,    # промежуточный дамп + resume на сбое
+            word_timestamps=word_timestamps,  # F20
         )
         ws_segments = list(ws_iter)  # потребляем итератор полностью
         status_msgs.append(
@@ -396,8 +429,12 @@ def _run_pipeline(
         progress(0.95, desc="Сопоставление спикеров…")
         aligned = alignment.align_speakers_with_segments(ws_segments, sp_segments)
 
-        # Экспорт во все форматы. Имя по timestamp — чтобы файлы не перезаписывали друг друга.
-        stem = f"transcript_{int(time.time())}"
+        # F12: формируем stem из названия встречи + slug + хэш файла.
+        # Если title пустой — slug=untitled, поведение совместимо со старыми
+        # стартами (просто менее читаемое имя). Хэш гарантирует уникальность.
+        # Берём первые 12 символов fingerprint для надёжности (build_stem обрежет до 6).
+        fingerprint = transcription._audio_fingerprint(prepared.path)
+        stem = naming.build_stem(meeting_title, fingerprint)
         base = OUTPUTS_DIR / stem
 
         # Метаданные для JSON-экспорта (внутри файла транскрипции).
@@ -412,10 +449,20 @@ def _run_pipeline(
         # F11: пишем все 5 экспортов БЕЗ speakers_map (имена ещё не введены).
         # Когда пользователь введёт имена и нажмёт «Применить и пересохранить» —
         # вызовется _apply_speaker_names, который перезапишет файлы с speakers_map.
-        title_for_md = f"Transcript ({meta.detected_language or '?'})"
+        title_for_md = meeting_title or f"Transcript ({meta.detected_language or '?'})"
+        # F23: YAML frontmatter для MD. duration берём из prepared (то что покажет
+        # пользователю), а не из meta.duration (внутренний считает Whisper).
+        md_frontmatter = {
+            "title": meeting_title or "",
+            "date": time.strftime("%Y-%m-%d"),
+            "duration_sec": prepared.duration_sec,
+            "model": meta.model_size,
+            "language": meta.detected_language or "",
+        }
         txt_path, srt_path, vtt_path, json_path, md_path = _write_all_exports(
             aligned, base, meta_dict, meta.detected_language, title_for_md,
             speakers_map=None,
+            md_frontmatter=md_frontmatter,
         )
 
         # F11: sidecar .meta.json — единый источник правды по «человеческим» данным.
@@ -431,7 +478,7 @@ def _run_pipeline(
         }
         meeting_meta = meta_mod.MeetingMeta(
             id=stem,
-            title="",
+            title=meeting_title or "",  # F12: пишем введённое название в sidecar
             created_at=meta_mod.utc_now_iso(),
             source_file={"name": Path(audio_file).name},
             duration_sec=float(prepared.duration_sec),
@@ -493,6 +540,18 @@ def _run_pipeline(
             audio_utils.cleanup(prepared)
 
 
+def _render_storage_status() -> str:
+    """F26: красивая строка с занимаемым местом для UI accordion."""
+    out_bytes, out_files = rotation.folder_stats(OUTPUTS_DIR)
+    cache_bytes, cache_files = rotation.folder_stats(CACHE_DIR)
+    return (
+        f"📂 **outputs/** — {rotation.human_size(out_bytes)} · {out_files} файлов  \n"
+        f"📦 **cache/** — {rotation.human_size(cache_bytes)} · {cache_files} файлов  \n"
+        f"_Авто-ротация: {rotation.DEFAULT_RETENTION_DAYS} дней / "
+        f"{rotation.DEFAULT_MAX_ENTRIES} групп._"
+    )
+
+
 # ---------- F11: re-export после переименования спикеров ----------
 
 def _apply_speaker_names(
@@ -548,10 +607,19 @@ def _apply_speaker_names(
         "diarized": meta_obj.diarized,
     }
     title_for_md = meta_obj.title or f"Transcript ({meta_obj.detected_language or '?'})"
+    # F23: при повторном экспорте сохраняем frontmatter с теми же полями.
+    md_frontmatter = {
+        "title": meta_obj.title or "",
+        "date": (meta_obj.created_at or "")[:10],  # YYYY-MM-DD из ISO 'YYYY-MM-DDTHH:MM:SSZ'
+        "duration_sec": meta_obj.duration_sec,
+        "model": meta_obj.model_size,
+        "language": meta_obj.detected_language or "",
+    }
     try:
         txt_path, srt_path, vtt_path, json_path, md_path = _write_all_exports(
             aligned, base, inner_meta, meta_obj.detected_language, title_for_md,
             speakers_map=mapping or None,
+            md_frontmatter=md_frontmatter,
         )
     except Exception as e:
         log.exception("re-export failed")
@@ -633,6 +701,14 @@ def build_ui() -> gr.Blocks:
 
         with gr.Row():
             with gr.Column(scale=2):
+                # F12: название встречи — над зоной загрузки, как требует ТЗ.
+                # Пустое поле допустимо: тогда slug = "untitled", файлы всё равно
+                # уникальны благодаря хэшу аудио в имени.
+                title_in = gr.Textbox(
+                    label="Название встречи (опционально)",
+                    placeholder="напр. Планирование Q3",
+                    value="",
+                )
                 audio_in = gr.File(
                     label="Аудио или видео (mp3/wav/m4a/flac/ogg/opus/aac/mp4/mov/mkv/avi/webm)",
                     file_types=[
@@ -661,6 +737,20 @@ def build_ui() -> gr.Blocks:
                         value=0,
                         precision=0,
                     )
+                # F15: шумоподавление + нормализация громкости.
+                # По умолчанию выключено — на чистых записях afftdn может убрать
+                # тихих спикеров; включай только для реально шумных файлов.
+                denoise_in = gr.Checkbox(
+                    label="Шумоподавление + нормализация громкости",
+                    value=False,
+                    info="ffmpeg loudnorm + afftdn. Помогает Whisper'у на шумных/тихих записях. +~50% времени конвертации.",
+                )
+                # F20: word-level timestamps. Off by default — +5-10% времени и памяти.
+                word_ts_in = gr.Checkbox(
+                    label="Слова с таймкодами (word-level timestamps)",
+                    value=False,
+                    info="Каждое слово получит свой start/end в .json. Замедляет на 5-10%.",
+                )
                 with gr.Accordion("HuggingFace токен (нужен для диаризации)", open=False):
                     has_token = config.has_hf_token()
                     saved_preview = _masked_token(config.get_hf_token() or "")
@@ -742,6 +832,33 @@ def build_ui() -> gr.Blocks:
             json_out = gr.File(label="JSON")
             md_out = gr.File(label="MD")
 
+        # F26: управление местом — accordion (по умолчанию свёрнут).
+        with gr.Accordion("Управление местом (outputs/ и cache/)", open=False):
+            storage_status = gr.Markdown(_render_storage_status())
+            cleanup_btn = gr.Button("Очистить старые", size="sm")
+
+            def _do_cleanup() -> str:
+                """Запустить ротацию вручную и обновить статус."""
+                try:
+                    res_out = rotation.cleanup_outputs(OUTPUTS_DIR)
+                    res_cache = rotation.cleanup_outputs(CACHE_DIR)
+                    total_removed = res_out.removed_groups + res_cache.removed_groups
+                    total_bytes = res_out.removed_bytes + res_cache.removed_bytes
+                    log.info(
+                        "manual cleanup: outputs -%d (%d B), cache -%d (%d B)",
+                        res_out.removed_groups, res_out.removed_bytes,
+                        res_cache.removed_groups, res_cache.removed_bytes,
+                    )
+                    return (
+                        f"Удалено {total_removed} групп ({rotation.human_size(total_bytes)}).\n\n"
+                        + _render_storage_status()
+                    )
+                except Exception as e:
+                    log.exception("manual cleanup failed")
+                    return f"Ошибка при уборке: {e}\n\n" + _render_storage_status()
+
+            cleanup_btn.click(fn=_do_cleanup, outputs=[storage_status])
+
         run_btn.click(
             fn=_run_pipeline,
             inputs=[
@@ -752,6 +869,9 @@ def build_ui() -> gr.Blocks:
                 language_in,
                 token_in,
                 save_token_in,
+                title_in,    # F12: meeting_title
+                denoise_in,  # F15: denoise flag
+                word_ts_in,  # F20: word-level timestamps
             ],
             outputs=[
                 preview_out,

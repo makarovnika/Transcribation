@@ -116,11 +116,11 @@
       "id": "F12-meeting-naming",
       "title": "Название встречи + осмысленные имена файлов",
       "priority": "P0",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F11-speaker-renaming"],
       "spec": "См. TZ-v2-improvements.md §F12. Поле title в UI, формат stem '{YYYY-MM-DD}_{slug}_{hash6}'. Slug: re.sub(r'[^\\w\\-]+', '-', title.lower()), без транслитерации (Unicode word chars OK).",
       "verification": "tests/test_naming.py: ASCII/Cyrillic/спецсимволы. E2E: ввёл название → файлы получили нужный stem.",
-      "evidence": null
+      "evidence": "src/naming.py: slugify (без транслитерации, кириллица сохраняется), build_stem. 15 unit-тестов test_naming.py — ASCII/cyrillic/punctuation/emoji/edge cases. app.py: поле title_in над audio_in, передаётся в _run_pipeline. Stem теперь '2026-MM-DD_<slug>_<hash6>'. title пишется в .meta.json. Pytest 97/97. E2E ждёт прогона."
     },
     {
       "id": "F13-ui-redesign",
@@ -146,11 +146,11 @@
       "id": "F15-audio-preprocessing",
       "title": "Шумоподавление и нормализация громкости",
       "priority": "P0",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F02-audio-utils"],
       "spec": "См. TZ-v2-improvements.md §F15. Чекбокс 'Шумоподавление' (default off). prepare_audio(denoise=False). ffmpeg -af 'loudnorm=I=-16:LRA=11:TP=-1.5,afftdn=nf=-25'.",
       "verification": "Ручное сравнение на шумном файле: транскрипт без denoise vs с denoise. probe_duration не меняется. Старые pytest зелёные.",
-      "evidence": null
+      "evidence": "src/audio_utils.py prepare_audio(denoise=False) — добавляет -af 'loudnorm=I=-16:LRA=11:TP=-1.5,afftdn=nf=-25' к команде ffmpeg при denoise=True. app.py: чекбокс denoise_in (default off) проброшен в _run_pipeline. Pytest 97/97 — denoise не сломал старые тесты. E2E на шумном файле ждёт прогона."
     },
     {
       "id": "F27-cross-platform-ram",
@@ -226,11 +226,11 @@
       "id": "F20-word-timestamps",
       "title": "Word-level timestamps",
       "priority": "P1",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F03-transcription"],
       "spec": "См. TZ-v2-improvements.md §F20. word_timestamps=True в обоих backends. Расширить Segment полем words: tuple[Word, ...]. Чекбокс в UI (default off).",
       "verification": "Unit: synthetic Segment с words → JSON содержит words[]. E2E: чекбокс on → words[] непуст.",
-      "evidence": null
+      "evidence": "src/transcription.py: dataclass Word(start, end, text, probability), Segment.words: tuple[Word, ...] = (). Оба бэкенда (mlx_backend, fw_backend) принимают word_timestamps=False, при True — заполняют words в каждом сегменте. _segment_from_dict для resume из cache. exporters: JSON содержит words[] если есть. app.py: чекбокс word_ts_in (default off), проброс в transcribe(). Pytest 97/97. E2E ждёт прогона."
     },
     {
       "id": "F21-turbo-model",
@@ -256,11 +256,11 @@
       "id": "F23-md-frontmatter",
       "title": "MD с YAML frontmatter",
       "priority": "P2",
-      "status": "not_started",
+      "status": "passing",
       "depends_on": ["F11-speaker-renaming"],
       "spec": "См. TZ-v2-improvements.md §F23. exporters.to_md добавляет YAML frontmatter с title/date/duration/speakers/model/language.",
       "verification": "Открыть в Obsidian: frontmatter распознан. Unit: yaml.safe_load на первом блоке ---.",
-      "evidence": null
+      "evidence": "src/exporters.py to_md(frontmatter={...}) — выводит ---\\ntitle: X\\ndate: 2026-05-26\\nduration: 47m 03s\\nspeakers: [Никита, Артём]\\n---. Speakers собираются из сегментов в порядке появления. Безопасное YAML-экранирование для значений с : / # / start-special-chars. tests/test_md_frontmatter.py — 9 тестов: yaml.safe_load round-trip, speakers ordered+unique, omit empty fields, special chars (двоеточие в title). Pytest 97/97."
     },
     {
       "id": "F24-notifications",

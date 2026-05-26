@@ -55,12 +55,27 @@ DEFAULT_MODEL: WhisperModelName = "large-v3"
 
 
 @dataclass(frozen=True)
-class Segment:
-    """Один сегмент транскрипции. start/end в секундах от начала файла."""
+class Word:
+    """Одно слово с таймкодами (F20). Появляется, если включён word_timestamps."""
 
     start: float
     end: float
     text: str
+    probability: float | None = None
+
+
+@dataclass(frozen=True)
+class Segment:
+    """Один сегмент транскрипции. start/end в секундах от начала файла.
+
+    words: tuple[Word, ...] — пустой по умолчанию. Заполняется только когда
+    word_timestamps=True (F20). Кортеж (а не список) для immutability dataclass.
+    """
+
+    start: float
+    end: float
+    text: str
+    words: tuple[Word, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,6 +94,30 @@ ProgressCallback = Callable[[str, float, str], None]
 
 def _noop_progress(stage: str, fraction: float, note: str) -> None:
     return None
+
+
+def _segment_from_dict(d: dict[str, Any]) -> Segment:
+    """Восстановить Segment из dict (для resume из partial-cache).
+
+    F20: поле words опционально — может быть list[dict] или вовсе отсутствовать.
+    Когда нет — Segment получает дефолтный пустой кортеж.
+    """
+    words_raw = d.get("words") or []
+    words_tuple = tuple(
+        Word(
+            start=float(w["start"]),
+            end=float(w["end"]),
+            text=str(w.get("text", "")),
+            probability=w.get("probability"),
+        )
+        for w in words_raw
+    )
+    return Segment(
+        start=float(d["start"]),
+        end=float(d["end"]),
+        text=str(d["text"]),
+        words=words_tuple,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +205,7 @@ def transcribe(
     chunk_seconds: int = DEFAULT_CHUNK_SECONDS,
     cache_dir: Path | str | None = None,
     resume: bool = True,
+    word_timestamps: bool = False,   # F20
 ) -> tuple[Iterator[Segment], TranscriptionMeta]:
     """Транскрибировать аудиофайл через mlx-whisper с чанкингом.
 
@@ -230,7 +270,7 @@ def transcribe(
         if resume:
             partial = _load_partial(cache_p)
             if partial and partial.get("chunk_seconds") == chunk_seconds:
-                accumulated = [Segment(**s) for s in partial["segments"]]
+                accumulated = [_segment_from_dict(s) for s in partial["segments"]]
                 start_chunk = int(partial.get("chunks_done", 0))
                 detected_lang = partial.get("language")
                 if 0 < start_chunk < chunks_total:
@@ -321,6 +361,7 @@ def transcribe(
             try:
                 seg_dicts, lang_from_chunk = backend.transcribe_chunk(
                     model_handle, chunk_arr, language,
+                    word_timestamps=word_timestamps,  # F20
                 )
             except Exception as e:
                 raise RuntimeError(
@@ -331,10 +372,22 @@ def transcribe(
                 detected_lang = lang_from_chunk
 
             for seg in seg_dicts:
+                # F20: если есть words — конвертируем в кортеж Word с offset.
+                words_raw = seg.get("words") or []
+                words_tuple = tuple(
+                    Word(
+                        start=float(w["start"]) + offset_sec,
+                        end=float(w["end"]) + offset_sec,
+                        text=str(w.get("text", "")),
+                        probability=w.get("probability"),
+                    )
+                    for w in words_raw
+                )
                 ours = Segment(
                     start=float(seg["start"]) + offset_sec,
                     end=float(seg["end"]) + offset_sec,
                     text=str(seg.get("text", "")).strip(),
+                    words=words_tuple,
                 )
                 segs_buf.append(ours)
                 yield ours

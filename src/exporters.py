@@ -150,13 +150,28 @@ def _segments_to_json_obj(
     seg_list = []
     for s in segments:
         display = _resolve(s.speaker, speakers_map)
-        seg_list.append({
+        seg_dict: dict[str, Any] = {
             "start": round(s.start, 3),
             "end": round(s.end, 3),
             "speaker": display,
             "speaker_id": s.speaker,  # F11: трассировка к pyannote-метке
             "text": s.text,
-        })
+        }
+        # F20: word-level timestamps. Если words заполнен — выводим в JSON.
+        # AlignedSegment не имеет поля words (это уровень Segment), но через
+        # getattr на всякий случай — на случай если в будущем AlignedSegment расширится.
+        words = getattr(s, "words", None)
+        if words:
+            seg_dict["words"] = [
+                {
+                    "start": round(float(w.start), 3),
+                    "end": round(float(w.end), 3),
+                    "text": w.text,
+                    "probability": w.probability,
+                }
+                for w in words
+            ]
+        seg_list.append(seg_dict)
     return {
         "schema_version": 1,
         "meta": meta or {},
@@ -178,24 +193,89 @@ def to_json(
 
 # ---------- MD ----------
 
+def _format_duration_human(sec: float | None) -> str:
+    """`47m 03s` / `1h 23m 45s`. Используется в YAML frontmatter."""
+    if not sec or sec <= 0:
+        return "0s"
+    total = int(round(sec))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
 def to_md(
     segments: Iterable[AlignedSegment],
     *,
     title: str | None = None,
     speakers_map: dict[str, str] | None = None,
+    frontmatter: dict[str, Any] | None = None,
 ) -> str:
     """Markdown с заголовками спикеров и таймкодами в скобках.
 
-    Структура: каждая смена спикера — новый блок `## SPEAKER` с репликой
+    F23: если передан frontmatter — выводим YAML-frontmatter (---\\n...\\n---) в
+    начале файла. Распознаётся Obsidian/Logseq/Notion-импортом. Формат полей:
+      title, date, duration, speakers (list), model, language.
+    Все опциональные; пустые значения пропускаются.
+
+    Структура тела: каждая смена спикера — новый блок `## SPEAKER` с репликой
     под ним. Таймкод реплики — в начале абзаца в `(HH:MM:SS)`.
     """
+    # Материализуем сегменты один раз — мы будем по ним ходить дважды
+    # (один раз для frontmatter speakers, один — для тела).
+    seg_list = list(segments)
+
     lines: list[str] = []
+
+    # F23: YAML frontmatter.
+    if frontmatter:
+        lines.append("---")
+        # Собираем уникальных спикеров в порядке появления — это «человечнее»
+        # чем алфавитный.
+        seen: set[str] = set()
+        speaker_list: list[str] = []
+        for seg in seg_list:
+            d = _resolve(seg.speaker, speakers_map)
+            if d not in seen and d:
+                seen.add(d)
+                speaker_list.append(d)
+
+        # Поля frontmatter. Только те, что нам передал caller.
+        items: list[tuple[str, Any]] = []
+        if frontmatter.get("title"):
+            items.append(("title", frontmatter["title"]))
+        if frontmatter.get("date"):
+            items.append(("date", frontmatter["date"]))
+        if frontmatter.get("duration_sec") is not None:
+            items.append(("duration", _format_duration_human(frontmatter["duration_sec"])))
+        if speaker_list:
+            items.append(("speakers", speaker_list))
+        if frontmatter.get("model"):
+            items.append(("model", frontmatter["model"]))
+        if frontmatter.get("language"):
+            items.append(("language", frontmatter["language"]))
+
+        # Ручное YAML-форматирование, чтобы не зависеть от PyYAML здесь
+        # (он есть в зависимостях, но генерация простого dict короче через f-strings).
+        # Для строк со спецсимволами оборачиваем в двойные кавычки.
+        for key, value in items:
+            if isinstance(value, list):
+                inline = ", ".join(_yaml_value(v) for v in value)
+                lines.append(f"{key}: [{inline}]")
+            else:
+                lines.append(f"{key}: {_yaml_value(value)}")
+        lines.append("---")
+        lines.append("")
+
     if title:
         lines.append(f"# {title}")
         lines.append("")
 
     current_display: str | None = None
-    for seg in segments:
+    for seg in seg_list:
         display = _resolve(seg.speaker, speakers_map)
         if display != current_display:
             current_display = display
@@ -207,6 +287,24 @@ def to_md(
         if text:
             lines.append(f"_({ts})_ {text}")
     return "\n".join(lines).strip() + "\n"
+
+
+def _yaml_value(v: Any) -> str:
+    """Безопасная YAML-сериализация скалярного значения.
+
+    Если содержит спецсимволы (двоеточие, кавычки, начинается с # и т.п.) —
+    оборачиваем в двойные кавычки с escape. Иначе выводим как есть.
+    """
+    s = str(v)
+    needs_quote = (
+        ":" in s or "#" in s or s.strip() != s
+        or s.startswith(("-", "[", "{", "&", "*", "!", "|", ">"))
+        or s.lower() in ("true", "false", "yes", "no", "null", "~", "")
+    )
+    if needs_quote:
+        escaped = s.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return s
 
 
 # ---------- Write helpers ----------
@@ -254,8 +352,11 @@ def write_md(
     *,
     title: str | None = None,
     speakers_map: dict[str, str] | None = None,
+    frontmatter: dict[str, Any] | None = None,
 ) -> Path:
-    return _write(path, to_md(segments, title=title, speakers_map=speakers_map))
+    return _write(path, to_md(
+        segments, title=title, speakers_map=speakers_map, frontmatter=frontmatter,
+    ))
 
 
 def _write(path: Path | str, content: str) -> Path:

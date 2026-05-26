@@ -158,18 +158,28 @@ def _probe_audio_stream(path: Path) -> tuple[int, int]:
 def prepare_audio(
     src: Path | str,
     workdir: Path | None = None,
+    *,
+    denoise: bool = False,
 ) -> PreparedAudio:
     """Привести аудио к WAV 16 kHz mono.
+
+    Args:
+        src: исходный файл (любой из SUPPORTED_EXTS).
+        workdir: куда класть temp-wav (для тестов). По умолчанию системный TMP.
+        denoise: F15 — применить ffmpeg-фильтры loudnorm + afftdn. По умолчанию
+            False, чтобы не ломать существующее поведение. Включается через
+            чекбокс UI на шумных записях.
 
     Логика:
     1) Проверяем расширение и наличие ffmpeg.
     2) Пробим длительность и параметры аудио-дорожки.
-    3) Если уже WAV 16 kHz mono — переиспользуем (is_temporary=False),
-       чтобы не тратить I/O на копирование 2 ГБ-файла.
-    4) Иначе — конвертируем в temp-wav, помечаем is_temporary=True.
+    3) Если уже WAV 16 kHz mono И denoise выключен — переиспользуем
+       (is_temporary=False), чтобы не тратить I/O на копирование 2 ГБ-файла.
+    4) Иначе — конвертируем в temp-wav. denoise добавляет в ffmpeg -af цепочку
+       loudnorm (EBU R128) + afftdn (spectral denoise) — помогает Whisper'у
+       на тихих/шумных записях ценой ~1.5× времени конвертации.
 
     Параметр workdir нужен для отладки и тестов: явно указать, куда класть temp.
-    В обычной жизни — пусть остаётся tempfile.gettempdir().
     """
     src_path = Path(src).expanduser().resolve()
     if not src_path.exists():
@@ -184,9 +194,12 @@ def prepare_audio(
     duration = probe_duration(src_path)
     sr, ch = _probe_audio_stream(src_path)
 
-    # Если уже соответствует контракту — не трогаем (быстрая ветка).
+    # Если уже соответствует контракту И denoise не нужен — не трогаем (быстрая ветка).
+    # F15: при denoise=True пропускаем эту оптимизацию, потому что нам нужно
+    # пропустить файл через ffmpeg-фильтры.
     if (
-        _ext(src_path) == ".wav"
+        not denoise
+        and _ext(src_path) == ".wav"
         and sr == TARGET_SAMPLE_RATE
         and ch == TARGET_CHANNELS
     ):
@@ -214,6 +227,14 @@ def prepare_audio(
         "-ac", str(TARGET_CHANNELS),
         "-ar", str(TARGET_SAMPLE_RATE),
         "-acodec", "pcm_s16le",
+    ]
+    # F15: фильтры. loudnorm — нормализация громкости по EBU R128
+    # (помогает Whisper'у на тихих/громких записях). afftdn — спектральное
+    # шумоподавление, nf=-25 — умеренно (агрессивнее может убить тихую речь).
+    # Цепочка через запятую — ffmpeg синтаксис.
+    if denoise:
+        cmd += ["-af", "loudnorm=I=-16:LRA=11:TP=-1.5,afftdn=nf=-25"]
+    cmd += [
         "-f", "wav",
         str(out_path),
         "-loglevel", "error",
