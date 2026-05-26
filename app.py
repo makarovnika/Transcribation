@@ -988,13 +988,15 @@ def build_ui() -> gr.Blocks:
                 preview_out = gr.Textbox(label="Результат", lines=20, interactive=False)
 
                 # F18: поиск по транскрипту в превью (текстовый, через Python).
+                # Markdown не принимает scale — оборачиваем в Column со scale.
                 with gr.Row():
-                    search_in = gr.Textbox(
-                        label="Поиск в транскрипте",
-                        placeholder="введи слово",
-                        scale=4,
-                    )
-                    search_count = gr.Markdown("", scale=1)
+                    with gr.Column(scale=4):
+                        search_in = gr.Textbox(
+                            label="Поиск в транскрипте",
+                            placeholder="введи слово",
+                        )
+                    with gr.Column(scale=1):
+                        search_count = gr.Markdown("")
 
                 def _search_in_preview(query: str, full_text: str) -> tuple[str, str]:
                     """Фильтрация строк превью по query. Кейс-инсенситивный.
