@@ -106,11 +106,11 @@
       "id": "F11-speaker-renaming",
       "title": "Переименование спикеров в UI",
       "priority": "P0",
-      "status": "not_started",
+      "status": "in_progress",
       "depends_on": ["F08-gradio-ui"],
       "spec": "См. TZ-v2-improvements.md §F11. Таблица спикеров со статистикой, .meta.json sidecar, применение display_name ко всем 5 экспортам. Поддержка слияния (одинаковые имена → один спикер).",
       "verification": "tests/test_speakers.py (расчёт статистики, edge cases) + e2e: до/после применения маппинга, diff в TXT и MD.",
-      "evidence": null
+      "evidence": "Код: src/speakers.py (compute_stats, normalize_mapping, apply_mapping, resolve_display_name), src/meta.py (MeetingMeta, SpeakerMeta, save/load), src/exporters.py (все 5 export-функций принимают speakers_map). UI: gr.Dataframe «Спикеры» + кнопка «Применить и пересохранить» + gr.State со снапшотом сессии. Тесты: 26 новых passed (15 test_speakers.py + 11 test_meta.py). Старые 27 не сломаны. JSON-экспорт теперь содержит speaker_id (трассировка). E2E (загрузить файл → ввести имя → Apply → проверить .txt/.md) — ждёт ручного прогона пользователем."
     },
     {
       "id": "F12-meeting-naming",

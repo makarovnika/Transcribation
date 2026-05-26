@@ -24,6 +24,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Any
 
 # Без line_buffering логи Python копятся в буфере и в фоновом режиме не видны
 # до завершения процесса. Для отладки UI нам нужен flush на каждой строке.
@@ -50,11 +51,102 @@ from src import (
     exporters,
     transcription,
 )
+# F11: модули для переименования спикеров и sidecar meta.json.
+# meta переименован в meta_mod, чтобы не конфликтовать с локальной переменной meta
+# (TranscriptionMeta), которую возвращает transcription.transcribe().
+from src import meta as meta_mod
+from src import speakers as speakers_mod
 
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
 OUTPUTS_DIR.mkdir(exist_ok=True)
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
+
+
+# ---------- F11 helpers: таблица спикеров и пересохранение ----------
+
+def _build_speaker_rows(
+    aligned: list[alignment.AlignedSegment],
+    saved_mapping: dict[str, str] | None = None,
+) -> list[list[str]]:
+    """Готовит rows для gr.Dataframe из aligned-сегментов.
+
+    Каждая строка: [label, display_name, "речь: 42% · 142 реплики"].
+    Сортируется по убыванию длительности речи (полезнее для пользователя).
+    """
+    stats = speakers_mod.compute_stats(aligned)
+    if not stats:
+        return []
+    total = sum(s.speech_seconds for s in stats) or 1.0
+    mapping = saved_mapping or {}
+    rows: list[list[str]] = []
+    for s in stats:
+        pct = 100.0 * s.speech_seconds / total
+        rows.append([
+            s.label,
+            mapping.get(s.label, ""),
+            f"речь: {pct:.0f}% · {s.turns} реплик",
+        ])
+    return rows
+
+
+def _session_state(
+    aligned: list[alignment.AlignedSegment],
+    stem_path: Path,
+    meta_obj: meta_mod.MeetingMeta,
+) -> dict[str, Any]:
+    """In-memory snapshot для повторного экспорта без прогона моделей.
+
+    Хранит aligned (с ИСХОДНЫМИ SPEAKER_XX, не переименованными), путь к stem
+    и meta-объект. Передаётся в gr.State между call'ами.
+    """
+    return {
+        "stem_path": str(stem_path),
+        "aligned": [
+            {"start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker}
+            for s in aligned
+        ],
+        # MeetingMeta сериализуем через to_dict, чтобы gr.State мог его pickle'ить.
+        "meta": meta_obj.to_dict(),
+    }
+
+
+def _restore_aligned(state_dict: dict[str, Any]) -> list[alignment.AlignedSegment]:
+    """Обратно из state в AlignedSegment-ы."""
+    return [
+        alignment.AlignedSegment(
+            start=float(s["start"]),
+            end=float(s["end"]),
+            text=str(s["text"]),
+            speaker=str(s["speaker"]),
+        )
+        for s in state_dict.get("aligned", [])
+    ]
+
+
+def _write_all_exports(
+    aligned: list[alignment.AlignedSegment],
+    base: Path,
+    meta_dict: dict[str, Any],
+    detected_language: str | None,
+    title_for_md: str,
+    speakers_map: dict[str, str] | None = None,
+) -> tuple[Path, Path, Path, Path, Path]:
+    """Записывает все 5 файлов одним вызовом. Используется и при первом экспорте,
+    и при повторном после переименования спикеров (F11 §2)."""
+    txt_path = exporters.write_txt(aligned, base.with_suffix(".txt"), speakers_map=speakers_map)
+    srt_path = exporters.write_srt(aligned, base.with_suffix(".srt"), speakers_map=speakers_map)
+    vtt_path = exporters.write_vtt(aligned, base.with_suffix(".vtt"), speakers_map=speakers_map)
+    # detected_language передан явно, чтобы не зависеть от meta_dict в подписи MD.
+    json_path = exporters.write_json(
+        aligned, base.with_suffix(".json"),
+        meta=meta_dict, speakers_map=speakers_map,
+    )
+    md_path = exporters.write_md(
+        aligned, base.with_suffix(".md"),
+        title=title_for_md, speakers_map=speakers_map,
+    )
+    return txt_path, srt_path, vtt_path, json_path, md_path
 
 
 def _total_ram_gb() -> float:
@@ -131,7 +223,7 @@ def _run_pipeline(
     )
 
     if not audio_file:
-        return ("", "Ошибка: файл не выбран.", None, None, None, None, None)
+        return ("", "Ошибка: файл не выбран.", None, None, None, None, None, [], {})
 
     # Soft-block для тяжёлых пресетов на машинах с малым RAM.
     # Не запускаем — потому что OOM-kill происходит молча (jetsam), без feedback
@@ -149,7 +241,7 @@ def _run_pipeline(
                 "под pyannote, или\n"
                 "  • закрой Chrome/IDE и попробуй `medium`."
             ),
-            None, None, None, None, None,
+            None, None, None, None, None, [], {},
         )
     if _LOW_RAM and do_diarize and model_size == "medium":
         log.warning("medium+diarize on low RAM (%.1f GB) — risky", _TOTAL_RAM_GB)
@@ -173,7 +265,7 @@ def _run_pipeline(
                 "Получи на huggingface.co/settings/tokens и прими условия модели "
                 "pyannote/speaker-diarization-3.1."
             ),
-            None, None, None, None, None,
+            None, None, None, None, None, [], {},
         )
 
     # Прогресс-колбэк, который пишет в Gradio. Подписываем этапы по доле.
@@ -265,10 +357,7 @@ def _run_pipeline(
         stem = f"transcript_{int(time.time())}"
         base = OUTPUTS_DIR / stem
 
-        # Метаданные для JSON-экспорта. Поля синхронизированы с TranscriptionMeta
-        # из mlx-версии transcription.py (language_probability там нет — убран,
-        # т.к. mlx-whisper его не возвращает; вместо него поля chunks_total и
-        # resumed_from_chunk показывают как считалось).
+        # Метаданные для JSON-экспорта (внутри файла транскрипции).
         meta_dict = {
             "model_size": meta.model_size,
             "detected_language": meta.detected_language,
@@ -277,19 +366,55 @@ def _run_pipeline(
             "resumed_from_chunk": meta.resumed_from_chunk,
             "diarized": do_diarize,
         }
-        txt_path = exporters.write_txt(aligned, base.with_suffix(".txt"))
-        srt_path = exporters.write_srt(aligned, base.with_suffix(".srt"))
-        vtt_path = exporters.write_vtt(aligned, base.with_suffix(".vtt"))
-        json_path = exporters.write_json(aligned, base.with_suffix(".json"), meta=meta_dict)
-        md_path = exporters.write_md(aligned, base.with_suffix(".md"),
-                                     title=f"Transcript ({meta.detected_language or '?'})")
+        # F11: пишем все 5 экспортов БЕЗ speakers_map (имена ещё не введены).
+        # Когда пользователь введёт имена и нажмёт «Применить и пересохранить» —
+        # вызовется _apply_speaker_names, который перезапишет файлы с speakers_map.
+        title_for_md = f"Transcript ({meta.detected_language or '?'})"
+        txt_path, srt_path, vtt_path, json_path, md_path = _write_all_exports(
+            aligned, base, meta_dict, meta.detected_language, title_for_md,
+            speakers_map=None,
+        )
+
+        # F11: sidecar .meta.json — единый источник правды по «человеческим» данным.
+        # Сейчас display_name пустые; пользователь заполнит через UI-таблицу.
+        stats_list = speakers_mod.compute_stats(aligned)
+        speakers_meta_dict = {
+            s.label: meta_mod.SpeakerMeta(
+                display_name="",
+                speech_seconds=s.speech_seconds,
+                turns=s.turns,
+            )
+            for s in stats_list
+        }
+        meeting_meta = meta_mod.MeetingMeta(
+            id=stem,
+            title="",
+            created_at=meta_mod.utc_now_iso(),
+            source_file={"name": Path(audio_file).name},
+            duration_sec=float(prepared.duration_sec),
+            model_size=meta.model_size,
+            detected_language=meta.detected_language,
+            diarized=do_diarize,
+            speakers=speakers_meta_dict,
+            files={
+                "txt": str(txt_path),
+                "srt": str(srt_path),
+                "vtt": str(vtt_path),
+                "json": str(json_path),
+                "md": str(md_path),
+            },
+        )
+        meta_mod.save_meta(base, meeting_meta)
 
         progress(1.0, desc="Готово")
 
-        # Preview — рендерим TXT-результат прямо в UI.
+        # Preview — рендерим TXT (пока без переименования).
         preview = exporters.to_txt(aligned)
         elapsed = time.time() - t0
         status_msgs.append(f"[done] {elapsed:.1f}s")
+
+        speaker_rows = _build_speaker_rows(aligned)
+        session = _session_state(aligned, base, meeting_meta)
 
         return (
             preview,
@@ -299,28 +424,116 @@ def _run_pipeline(
             str(vtt_path),
             str(json_path),
             str(md_path),
+            speaker_rows,   # F11: для gr.Dataframe со спикерами
+            session,        # F11: для gr.State (re-export без прогона моделей)
         )
 
     except audio_utils.FFmpegMissingError as e:
         log.exception("ffmpeg missing")
-        return ("", f"Ошибка: {e}", None, None, None, None, None)
+        return ("", f"Ошибка: {e}", None, None, None, None, None, [], {})
     except audio_utils.UnsupportedFormatError as e:
         log.exception("unsupported format")
-        return ("", f"Ошибка формата: {e}", None, None, None, None, None)
+        return ("", f"Ошибка формата: {e}", None, None, None, None, None, [], {})
     except diarization.HFAuthError as e:
         log.exception("HF auth")
-        return ("", f"Ошибка HuggingFace: {e}", None, None, None, None, None)
+        return ("", f"Ошибка HuggingFace: {e}", None, None, None, None, None, [], {})
     except FileNotFoundError as e:
         log.exception("file not found")
-        return ("", f"Файл не найден: {e}", None, None, None, None, None)
+        return ("", f"Файл не найден: {e}", None, None, None, None, None, [], {})
     except Exception as e:
         # Любая нелокализованная ошибка — в UI с полным traceback.
         log.exception("pipeline failed")
         tb = traceback.format_exc(limit=8)
-        return ("", f"Неожиданная ошибка: {e}\n\n{tb}", None, None, None, None, None)
+        return ("", f"Неожиданная ошибка: {e}\n\n{tb}", None, None, None, None, None, [], {})
     finally:
         if prepared is not None:
             audio_utils.cleanup(prepared)
+
+
+# ---------- F11: re-export после переименования спикеров ----------
+
+def _apply_speaker_names(
+    rows: list[list[str]] | Any,
+    state: dict[str, Any],
+) -> tuple[str, str, str | None, str | None, str | None, str | None, str | None]:
+    """Перезаписать 5 экспортов с подменой SPEAKER_XX на введённые имена + обновить .meta.json.
+
+    rows: список [label, name, stats_str] из gr.Dataframe.
+    state: dict с aligned, stem_path, meta.
+
+    Возвращает: (preview, status, txt, srt, vtt, json, md).
+    """
+    # gr.Dataframe может прислать pandas.DataFrame или list[list[str]] — нормализуем.
+    if rows is None or (hasattr(rows, "empty") and rows.empty):
+        return ("", "Нет данных. Сначала запусти транскрибацию.", None, None, None, None, None)
+
+    if hasattr(rows, "values"):
+        rows_list = rows.values.tolist()
+    else:
+        rows_list = list(rows)
+
+    if not state or "aligned" not in state:
+        return ("", "Состояние сессии пустое. Запусти транскрибацию заново.",
+                None, None, None, None, None)
+
+    # Собираем mapping из rows. Пустые имена → не маппим (фолбэк на SPEAKER_XX).
+    raw_mapping: dict[str, str] = {}
+    for row in rows_list:
+        if not row or len(row) < 2:
+            continue
+        label = str(row[0]).strip()
+        name = str(row[1]).strip() if row[1] is not None else ""
+        if label:
+            raw_mapping[label] = name
+    mapping = speakers_mod.normalize_mapping(raw_mapping)
+    log.info("apply speaker names: %d mappings", len(mapping))
+
+    # Восстанавливаем aligned и пути.
+    aligned = _restore_aligned(state)
+    base = Path(state["stem_path"])
+    meta_obj = meta_mod.MeetingMeta.from_dict(state.get("meta", {}))
+
+    # Обновляем display_name в meeting_meta.
+    for label, spk in meta_obj.speakers.items():
+        spk.display_name = mapping.get(label, "")
+
+    # Перезаписываем 5 файлов. meta_dict для JSON-экспорта берём из MeetingMeta.
+    inner_meta = {
+        "model_size": meta_obj.model_size,
+        "detected_language": meta_obj.detected_language,
+        "duration": meta_obj.duration_sec,
+        "diarized": meta_obj.diarized,
+    }
+    title_for_md = meta_obj.title or f"Transcript ({meta_obj.detected_language or '?'})"
+    try:
+        txt_path, srt_path, vtt_path, json_path, md_path = _write_all_exports(
+            aligned, base, inner_meta, meta_obj.detected_language, title_for_md,
+            speakers_map=mapping or None,
+        )
+    except Exception as e:
+        log.exception("re-export failed")
+        return ("", f"Ошибка при пересохранении: {e}", None, None, None, None, None)
+
+    # Обновляем meta.json sidecar.
+    meta_obj.files = {
+        "txt": str(txt_path), "srt": str(srt_path), "vtt": str(vtt_path),
+        "json": str(json_path), "md": str(md_path),
+    }
+    try:
+        meta_mod.save_meta(base, meta_obj)
+    except OSError as e:
+        log.warning("save_meta failed: %s", e)
+        # Не фатально — экспорты записаны.
+
+    # Превью с применёнными именами.
+    preview = exporters.to_txt(aligned, speakers_map=mapping or None)
+    applied = ", ".join(f"{k}→{v}" for k, v in mapping.items()) or "пусто"
+    status = f"✓ Пересохранено с маппингом: {applied}"
+
+    return (
+        preview, status,
+        str(txt_path), str(srt_path), str(vtt_path), str(json_path), str(md_path),
+    )
 
 
 # ---------- UI ----------
@@ -457,6 +670,27 @@ def build_ui() -> gr.Blocks:
                 status_out = gr.Textbox(label="Статус", lines=6, interactive=False)
                 preview_out = gr.Textbox(label="Результат", lines=20, interactive=False)
 
+        # F11: in-memory снапшот сессии (aligned + meta), чтобы re-export не требовал
+        # повторного прогона моделей. gr.State хранит произвольный dict между call'ами.
+        session_state = gr.State({})
+
+        # F11: таблица спикеров со статистикой.
+        gr.Markdown("### Спикеры")
+        gr.Markdown(
+            "_Заполни имена и нажми «Применить и пересохранить» — все 5 файлов "
+            "перезапишутся с новыми именами. Пустые поля оставят машинную метку. "
+            "Одинаковые имена для разных меток = объединение спикера (полезно, если "
+            "pyannote разделил одного человека)._"
+        )
+        speakers_table = gr.Dataframe(
+            headers=["Метка", "Имя", "Статистика"],
+            datatype=["str", "str", "str"],
+            col_count=(3, "fixed"),
+            interactive=True,
+            wrap=True,
+        )
+        apply_btn = gr.Button("Применить и пересохранить", variant="secondary")
+
         gr.Markdown("### Скачать результат")
         with gr.Row():
             txt_out = gr.File(label="TXT")
@@ -484,6 +718,17 @@ def build_ui() -> gr.Blocks:
                 vtt_out,
                 json_out,
                 md_out,
+                speakers_table,  # F11: rows для таблицы спикеров
+                session_state,   # F11: dict со snapshot сессии
+            ],
+        )
+
+        apply_btn.click(
+            fn=_apply_speaker_names,
+            inputs=[speakers_table, session_state],
+            outputs=[
+                preview_out, status_out,
+                txt_out, srt_out, vtt_out, json_out, md_out,
             ],
         )
 

@@ -150,3 +150,32 @@ False, и soft-block large-v3 не срабатывает.
 **Дальше:** F11 (переименование спикеров) — фундамент для F12, F14, F17-F19, F22, F23.
 
 **Блокеры:** нет.
+
+### F27 evidence:
+- На Mac: `_total_ram_gb()` через psutil = 8.0 ГБ, `_LOW_RAM=True`.
+- pytest 27/27.
+- На Windows проверится после развёртки (psutil кросс-платформенный).
+
+### F11 implementation (in_progress, evidence ниже):
+- **src/speakers.py** — compute_stats, normalize_mapping, apply_mapping, resolve_display_name. 15 unit-тестов в test_speakers.py.
+- **src/meta.py** — MeetingMeta dataclass со schema_version=2, SpeakerMeta, save/load с атомарной записью, utc_now_iso. 11 unit-тестов в test_meta.py.
+- **src/exporters.py** — все 5 export-функций (to_txt/srt/vtt/md/json и write_*) принимают `speakers_map: dict[str,str] | None`. JSON содержит и `speaker` (display) и `speaker_id` (исходная метка — трассировка). 2 новых теста: JSON со speakers_map, TXT со speakers_map. Старый JSON-тест обновлён под новую схему.
+- **app.py**:
+  - Импорты: `from src import meta as meta_mod` и `from src import speakers as speakers_mod`.
+  - Helpers: `_build_speaker_rows`, `_session_state`, `_restore_aligned`, `_write_all_exports`.
+  - `_run_pipeline` теперь возвращает 9-tuple (+ rows для таблицы + dict для gr.State). Все ранние return-пути тоже обновлены.
+  - После первого экспорта пишется sidecar `<stem>.meta.json` со схемой v2 (speakers.SpeakerMeta для каждой метки, display_name="").
+  - Новый handler `_apply_speaker_names(rows, state) -> 7-tuple`. Принимает rows из gr.Dataframe, собирает mapping, обновляет meta.json (display_name), пересохраняет 5 файлов с speakers_map.
+  - UI: `gr.State` для сессии, `gr.Dataframe` со столбцами [Метка, Имя, Статистика], `gr.Button("Применить и пересохранить")`.
+
+**Verification (что сделано):**
+- pytest 55/55 (27 старых + 15 speakers + 11 meta + 2 новых exporter).
+- `python -c "import app"` — все импорты чистые на venv.
+- `bin/svc-restart.sh` → UI отвечает HTTP 200.
+
+**Verification (ждёт E2E пользователем):**
+- Загрузить файл → транскрибация → диаризация → проверить что таблица «Спикеры» заполнилась со статистикой.
+- Ввести имена («Никита», «Артём») → нажать «Применить и пересохранить» → открыть .txt и .md и убедиться что имена применены везде.
+- diff .json до/после: проверить что speaker = display_name, speaker_id = SPEAKER_XX.
+
+**Следующий шаг (после подтверждения F11 e2e):** F12 (название встречи + slug в именах файлов), затем F13 (UI redesign по mockup), затем F14 (история встреч).

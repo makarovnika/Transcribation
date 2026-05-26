@@ -104,9 +104,35 @@ def test_json_round_trip() -> None:
     assert obj["schema_version"] == 1
     assert obj["meta"]["language"] == "ru"
     assert len(obj["segments"]) == 2
+    # F11: в JSON всегда есть и speaker (display), и speaker_id (трассировка).
+    # Без speakers_map — оба равны исходной метке.
     assert obj["segments"][0] == {
-        "start": 0.0, "end": 1.5, "speaker": "SPEAKER_00", "text": "Привет",
+        "start": 0.0, "end": 1.5, "speaker": "SPEAKER_00",
+        "speaker_id": "SPEAKER_00", "text": "Привет",
     }
+    assert obj["segments"][1]["speaker_id"] == "SPEAKER_01"
+
+
+def test_json_speakers_map_applies_display_name() -> None:
+    # F11: speakers_map подменяет speaker, но speaker_id остаётся исходным.
+    segments = [_aseg(0, 1, "x", speaker="SPEAKER_00"), _aseg(1, 2, "y", speaker="SPEAKER_01")]
+    out = to_json(segments, speakers_map={"SPEAKER_00": "Никита"})
+    obj = json.loads(out)
+    # SPEAKER_00 → отображается как Никита, speaker_id хранит исходное.
+    assert obj["segments"][0]["speaker"] == "Никита"
+    assert obj["segments"][0]["speaker_id"] == "SPEAKER_00"
+    # SPEAKER_01 без маппинга — оба значения равны.
+    assert obj["segments"][1]["speaker"] == "SPEAKER_01"
+    assert obj["segments"][1]["speaker_id"] == "SPEAKER_01"
+
+
+def test_txt_speakers_map_applies_display_name() -> None:
+    # F11: TXT тоже использует speakers_map.
+    from src.exporters import to_txt as _to_txt  # noqa: PLC0415
+    segments = [_aseg(0, 1, "Привет"), _aseg(1, 2, "Как дела")]
+    out = _to_txt(segments, speakers_map={"SPEAKER_00": "Никита"})
+    assert "[Никита]:" in out
+    assert "[SPEAKER_00]:" not in out
 
 
 def test_json_ensure_ascii_false() -> None:

@@ -45,24 +45,44 @@ def _format_timestamp(seconds: float, *, decimal_sep: str = ",") -> str:
 
 # ---------- TXT ----------
 
-def to_txt(segments: Iterable[AlignedSegment]) -> str:
+def _resolve(speaker: str, speakers_map: dict[str, str] | None) -> str:
+    """Подменить SPEAKER_XX на display_name из speakers_map. Пустые имена игнорим.
+
+    Локальная копия того, что в src.speakers.resolve_display_name, чтобы не
+    плодить circular imports (exporters не должен зависеть от speakers).
+    """
+    if speakers_map:
+        name = speakers_map.get(speaker, "").strip() if isinstance(speakers_map.get(speaker), str) else ""
+        if name:
+            return name
+    return speaker
+
+
+def to_txt(
+    segments: Iterable[AlignedSegment],
+    *,
+    speakers_map: dict[str, str] | None = None,
+) -> str:
     """Чистый текст, метки спикеров в квадратных скобках.
 
-    Соседние сегменты одного спикера сшиваем пробелом — это читается лучше,
-    чем «[SPEAKER]: » на каждой строке транскрипции.
+    Соседние сегменты одного спикера (с учётом резолва имени) сшиваем пробелом —
+    это читается лучше, чем «[SPEAKER]: » на каждой строке транскрипции.
+
+    speakers_map — опциональный маппинг SPEAKER_XX → display_name (F11).
     """
     lines: list[str] = []
-    current_speaker: str | None = None
+    current_display: str | None = None
     buf: list[str] = []
 
     def flush() -> None:
-        if current_speaker is not None and buf:
-            lines.append(f"[{current_speaker}]: {' '.join(buf).strip()}")
+        if current_display is not None and buf:
+            lines.append(f"[{current_display}]: {' '.join(buf).strip()}")
 
     for seg in segments:
-        if seg.speaker != current_speaker:
+        display = _resolve(seg.speaker, speakers_map)
+        if display != current_display:
             flush()
-            current_speaker = seg.speaker
+            current_display = display
             buf = []
         text = seg.text.strip()
         if text:
@@ -74,14 +94,19 @@ def to_txt(segments: Iterable[AlignedSegment]) -> str:
 
 # ---------- SRT ----------
 
-def to_srt(segments: Iterable[AlignedSegment]) -> str:
+def to_srt(
+    segments: Iterable[AlignedSegment],
+    *,
+    speakers_map: dict[str, str] | None = None,
+) -> str:
     """Стандартный SRT. Нумерация с 1. Запятая в ms."""
     blocks: list[str] = []
     for i, seg in enumerate(segments, start=1):
         start = _format_timestamp(seg.start, decimal_sep=",")
         end = _format_timestamp(seg.end, decimal_sep=",")
         text = seg.text.strip() or "[…]"  # пустой сегмент возможен — не ломаем формат
-        speaker_prefix = f"[{seg.speaker}]: " if seg.speaker else ""
+        display = _resolve(seg.speaker, speakers_map)
+        speaker_prefix = f"[{display}]: " if display else ""
         blocks.append(f"{i}\n{start} --> {end}\n{speaker_prefix}{text}\n")
     # SRT-блоки разделяются пустой строкой; в конце файла принято иметь \n\n.
     return "\n".join(blocks)
@@ -89,14 +114,19 @@ def to_srt(segments: Iterable[AlignedSegment]) -> str:
 
 # ---------- VTT ----------
 
-def to_vtt(segments: Iterable[AlignedSegment]) -> str:
+def to_vtt(
+    segments: Iterable[AlignedSegment],
+    *,
+    speakers_map: dict[str, str] | None = None,
+) -> str:
     """WebVTT. Точка в ms. Header WEBVTT обязателен."""
     out: list[str] = ["WEBVTT", ""]  # пустая строка после header — требование RFC
     for seg in segments:
         start = _format_timestamp(seg.start, decimal_sep=".")
         end = _format_timestamp(seg.end, decimal_sep=".")
         text = seg.text.strip() or "[…]"
-        speaker_prefix = f"[{seg.speaker}]: " if seg.speaker else ""
+        display = _resolve(seg.speaker, speakers_map)
+        speaker_prefix = f"[{display}]: " if display else ""
         out.append(f"{start} --> {end}")
         out.append(f"{speaker_prefix}{text}")
         out.append("")  # пустая строка между cue
@@ -109,17 +139,24 @@ def _segments_to_json_obj(
     segments: Iterable[AlignedSegment],
     *,
     meta: dict[str, Any] | None = None,
+    speakers_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Стабильная схема. Меняется только с миграцией формата."""
-    seg_list = [
-        {
+    """Стабильная схема. Меняется только с миграцией формата.
+
+    speaker:    отображаемое имя (display_name если есть, иначе исходная метка).
+    speaker_id: ИСХОДНАЯ метка SPEAKER_XX. Нужна для трассировки (F11 §4)
+                и для re-export после изменения маппинга.
+    """
+    seg_list = []
+    for s in segments:
+        display = _resolve(s.speaker, speakers_map)
+        seg_list.append({
             "start": round(s.start, 3),
             "end": round(s.end, 3),
-            "speaker": s.speaker,
+            "speaker": display,
+            "speaker_id": s.speaker,  # F11: трассировка к pyannote-метке
             "text": s.text,
-        }
-        for s in segments
-    ]
+        })
     return {
         "schema_version": 1,
         "meta": meta or {},
@@ -131,10 +168,11 @@ def to_json(
     segments: Iterable[AlignedSegment],
     *,
     meta: dict[str, Any] | None = None,
+    speakers_map: dict[str, str] | None = None,
     indent: int = 2,
 ) -> str:
     """JSON-дамп. ensure_ascii=False — чтобы русский был читаем."""
-    obj = _segments_to_json_obj(segments, meta=meta)
+    obj = _segments_to_json_obj(segments, meta=meta, speakers_map=speakers_map)
     return json.dumps(obj, ensure_ascii=False, indent=indent)
 
 
@@ -144,10 +182,11 @@ def to_md(
     segments: Iterable[AlignedSegment],
     *,
     title: str | None = None,
+    speakers_map: dict[str, str] | None = None,
 ) -> str:
     """Markdown с заголовками спикеров и таймкодами в скобках.
 
-    Структура: каждая смена спикера — новый блок `## SPEAKER` с реплик`ой
+    Структура: каждая смена спикера — новый блок `## SPEAKER` с репликой
     под ним. Таймкод реплики — в начале абзаца в `(HH:MM:SS)`.
     """
     lines: list[str] = []
@@ -155,12 +194,13 @@ def to_md(
         lines.append(f"# {title}")
         lines.append("")
 
-    current_speaker: str | None = None
+    current_display: str | None = None
     for seg in segments:
-        if seg.speaker != current_speaker:
-            current_speaker = seg.speaker
+        display = _resolve(seg.speaker, speakers_map)
+        if display != current_display:
+            current_display = display
             lines.append("")  # пустая строка перед новым разделом
-            lines.append(f"## {seg.speaker}")
+            lines.append(f"## {display}")
             lines.append("")
         ts = _format_timestamp(seg.start, decimal_sep=".").split(".")[0]
         text = seg.text.strip()
@@ -171,16 +211,31 @@ def to_md(
 
 # ---------- Write helpers ----------
 
-def write_txt(segments: Iterable[AlignedSegment], path: Path | str) -> Path:
-    return _write(path, to_txt(segments))
+def write_txt(
+    segments: Iterable[AlignedSegment],
+    path: Path | str,
+    *,
+    speakers_map: dict[str, str] | None = None,
+) -> Path:
+    return _write(path, to_txt(segments, speakers_map=speakers_map))
 
 
-def write_srt(segments: Iterable[AlignedSegment], path: Path | str) -> Path:
-    return _write(path, to_srt(segments))
+def write_srt(
+    segments: Iterable[AlignedSegment],
+    path: Path | str,
+    *,
+    speakers_map: dict[str, str] | None = None,
+) -> Path:
+    return _write(path, to_srt(segments, speakers_map=speakers_map))
 
 
-def write_vtt(segments: Iterable[AlignedSegment], path: Path | str) -> Path:
-    return _write(path, to_vtt(segments))
+def write_vtt(
+    segments: Iterable[AlignedSegment],
+    path: Path | str,
+    *,
+    speakers_map: dict[str, str] | None = None,
+) -> Path:
+    return _write(path, to_vtt(segments, speakers_map=speakers_map))
 
 
 def write_json(
@@ -188,8 +243,9 @@ def write_json(
     path: Path | str,
     *,
     meta: dict[str, Any] | None = None,
+    speakers_map: dict[str, str] | None = None,
 ) -> Path:
-    return _write(path, to_json(segments, meta=meta))
+    return _write(path, to_json(segments, meta=meta, speakers_map=speakers_map))
 
 
 def write_md(
@@ -197,8 +253,9 @@ def write_md(
     path: Path | str,
     *,
     title: str | None = None,
+    speakers_map: dict[str, str] | None = None,
 ) -> Path:
-    return _write(path, to_md(segments, title=title))
+    return _write(path, to_md(segments, title=title, speakers_map=speakers_map))
 
 
 def _write(path: Path | str, content: str) -> Path:
