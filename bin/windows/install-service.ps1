@@ -1,4 +1,4 @@
-# install-service.ps1 — регистрирует транскрибатор как Task Scheduler задачу.
+﻿# install-service.ps1 — регистрирует транскрибатор как Task Scheduler задачу.
 #
 # Эквивалент launchd Agent на Mac:
 #   - стартует при логине пользователя;

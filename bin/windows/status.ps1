@@ -1,4 +1,4 @@
-# status.ps1 — короткий статус сервиса.
+﻿# status.ps1 — короткий статус сервиса.
 
 $taskName = "transcriber"
 $taskPath = "\transcriber\"

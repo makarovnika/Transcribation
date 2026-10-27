@@ -1,4 +1,4 @@
-# _runner.ps1 — wrapper, который Task Scheduler запускает вместо python.
+﻿# _runner.ps1 — wrapper, который Task Scheduler запускает вместо python.
 #
 # Зачем wrapper, а не прямой `python -u app.py`:
 #   Task Scheduler не умеет напрямую перенаправлять stdout/stderr в файлы.

@@ -1,4 +1,4 @@
-# setup.ps1 — установка окружения транскрибатора на Windows.
+﻿# setup.ps1 — установка окружения транскрибатора на Windows.
 #
 # Что делает:
 #   1) Проверяет наличие Python 3.10-3.13, ffmpeg, uv. Помогает поставить, если чего нет.
@@ -34,9 +34,9 @@ $pythonCmd = $null
 foreach ($cmd in @("python", "py", "python3")) {
     if (Get-Command $cmd -ErrorAction SilentlyContinue) {
         $version = & $cmd --version 2>&1
-        if ($version -match "Python (3\.(1[0-3]))") {
+        if ($LASTEXITCODE -eq 0 -and $version -match "^Python 3\.(10|11|12|13)\.\d+(?:\s|$)") {
             $pythonCmd = $cmd
-            Write-Host "[ok] $cmd: $version"
+            Write-Host "[ok] ${cmd}: $version"
             break
         }
     }
@@ -67,9 +67,14 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path ".venv")) {
     Write-Host "[..] создаю .venv"
     if ($useUv) {
-        uv venv
+        # Используем проверенный Python; --seed нужен для последующей установки CUDA через pip.
+        uv venv --python $pythonCmd --seed
     } else {
         & $pythonCmd -m venv .venv
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[!!] Не удалось создать .venv. Посмотри вывод выше."
+        exit 1
     }
 }
 
@@ -82,9 +87,13 @@ if (-not (Test-Path $venvPython)) {
 
 Write-Host "[..] ставлю зависимости (это долго, тянет torch + faster-whisper + pyannote)…"
 if ($useUv) {
-    uv pip install -e ".[dev]"
+    uv pip install --python $venvPython -e ".[dev]"
 } else {
     & $venvPython -m pip install --upgrade pip
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[!!] Не удалось обновить pip. Посмотри вывод выше."
+        exit 1
+    }
     & $venvPython -m pip install -e ".[dev]"
 }
 if ($LASTEXITCODE -ne 0) {

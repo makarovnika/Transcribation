@@ -1,4 +1,4 @@
-# restart-service.ps1 — перезапустить сервис (применить изменения в коде).
+﻿# restart-service.ps1 — перезапустить сервис (применить изменения в коде).
 
 $ErrorActionPreference = "Stop"
 

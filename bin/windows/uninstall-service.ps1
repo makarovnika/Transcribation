@@ -1,4 +1,4 @@
-# uninstall-service.ps1 — снять Task Scheduler-задачу транскрибатора.
+﻿# uninstall-service.ps1 — снять Task Scheduler-задачу транскрибатора.
 
 $ErrorActionPreference = "Stop"
 
