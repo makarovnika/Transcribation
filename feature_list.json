@@ -2,6 +2,16 @@
   "$schema_note": "v2 — улучшения после MVP. Статусы: not_started | in_progress | passing | blocked. Все детали — в TZ-v2-improvements.md.",
   "features": [
     {
+      "id": "F30-windows-setup-compatibility",
+      "title": "Исправление установщика Windows PowerShell 5.1",
+      "priority": "P0",
+      "status": "in_progress",
+      "depends_on": [],
+      "spec": "Корректная интерполяция, UTF-8 BOM во всех PS1, проверенный Python и pip в venv, остановка при ошибках установки.",
+      "verification": "pytest tests/test_windows_scripts.py на Windows PowerShell 5.1: ParseFile, BOM и четыре сценария setup; общий pytest на Mac. Полная установка моделей/CUDA проверяется отдельно на целевом ПК.",
+      "evidence": "2026-10-27: общий pytest в существующем Mac-окружении — 139 passed, 11 skipped (Windows/PowerShell). Ruff и diff --check прошли. Fresh init.sh: timeout pypi.org/simple/tokenizers/, установка не завершена. Windows CI ожидается. PR #1."
+    },
+    {
       "id": "F01-device",
       "title": "Автоопределение устройства (MPS/MLX)",
       "priority": "P0",

@@ -1,5 +1,17 @@
 # session-handoff.md — короткая передача между сессиями
 
+## 2026-10-27 — Windows setup compatibility
+
+- Исправлены `${cmd}:` и UTF-8 BOM во всех семи Windows PS1; добавлен `.editorconfig`.
+- uv использует проверенный Python, seed pip и явный Python окружения; ошибки venv/pip завершают установку.
+- Добавлены tests/test_windows_scripts.py и Windows CI с настоящим PowerShell 5.1; PR #1.
+- Mac: 139 passed, 11 skipped; Ruff и diff --check прошли. Windows CI ожидается.
+- Fresh init.sh: timeout pypi.org/simple/tokenizers/; установка не завершена. Старое окружение не менялось.
+- Полная установка моделей/CUDA и транскрибация на Windows ПК остаются непроверенными.
+- Локальные файлы автоматизации в ~/transcriber не затронуты: работа в отдельной копии.
+
+---
+
 > 5–10 строк. То, что нужно знать следующему агенту/себе через сутки.
 
 ---
