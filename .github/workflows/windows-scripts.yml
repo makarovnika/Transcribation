@@ -1,0 +1,22 @@
+name: Windows scripts
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test runner
+        run: python -m pip install pytest
+      - name: Check Windows PowerShell 5.1 scripts and setup control flow
+        run: python -m pytest tests/test_windows_scripts.py -v

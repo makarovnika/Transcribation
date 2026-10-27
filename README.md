@@ -106,7 +106,9 @@ UI:
 
 ## Установка на Windows
 
-Тестировано: Windows 10/11 + Python 3.10–3.13. NVIDIA GPU **не обязательна**,
+Поддерживается: Windows 10/11 + PowerShell 5.1/7 + Python 3.10–3.13.
+Скрипты проверяются в CI на Windows PowerShell 5.1; полная установка моделей
+и работа CUDA требуют проверки на целевом ПК. NVIDIA GPU **не обязательна**,
 но с ней транскрибация быстрее в разы (CUDA + float16). На RTX 3050 Ti
 (4 ГБ VRAM) `large-v3` помещается с запасом.
 
@@ -150,6 +152,19 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 - создаст `.venv`,
 - поставит зависимости (`faster-whisper`, `pyannote.audio`, `gradio`, `torch`, …),
 - прогонит smoke pytest.
+
+Если репозиторий уже скачан, обнови его перед повторным запуском:
+
+```powershell
+git pull --ff-only origin main
+.\bin\windows\setup.ps1
+```
+
+При ошибках `InvalidVariableReferenceWithDrive`, «В строке отсутствует
+завершающий символ» или нечитаемом русском тексте обнови скрипты. В старой
+версии были ошибка `${cmd}:` и UTF-8 без BOM. Файлы `bin/windows/*.ps1`
+должны сохраняться в **UTF-8 с BOM** для Windows PowerShell 5.1;
+это правило также задано в `.editorconfig`.
 
 ### 4. (Опционально) CUDA для GPU-ускорения
 

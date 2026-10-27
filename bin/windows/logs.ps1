@@ -1,4 +1,4 @@
-# logs.ps1 — стрим логов сервиса (аналог tail -F).
+﻿# logs.ps1 — стрим логов сервиса (аналог tail -F).
 # Прерывание — Ctrl+C.
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
