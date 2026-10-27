@@ -162,7 +162,7 @@ git pull --ff-only origin main
 
 При ошибках `InvalidVariableReferenceWithDrive`, «В строке отсутствует
 завершающий символ» или нечитаемом русском тексте обнови скрипты. В старой
-версии были ошибка `${cmd}:` и UTF-8 без BOM. Файлы `bin/windows/*.ps1`
+версии были ошибка `$cmd:` и UTF-8 без BOM. Файлы `bin/windows/*.ps1`
 должны сохраняться в **UTF-8 с BOM** для Windows PowerShell 5.1;
 это правило также задано в `.editorconfig`.
 

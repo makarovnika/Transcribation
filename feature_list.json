@@ -9,7 +9,7 @@
       "depends_on": [],
       "spec": "Корректная интерполяция, UTF-8 BOM во всех PS1, проверенный Python и pip в venv, остановка при ошибках установки.",
       "verification": "pytest tests/test_windows_scripts.py на Windows PowerShell 5.1: ParseFile, BOM и четыре сценария setup; общий pytest на Mac. Полная установка моделей/CUDA проверяется отдельно на целевом ПК.",
-      "evidence": "2026-10-27: общий pytest в существующем Mac-окружении — 139 passed, 11 skipped (Windows/PowerShell). Ruff и diff --check прошли. Fresh init.sh: timeout pypi.org/simple/tokenizers/, установка не завершена. Windows CI ожидается. PR #1."
+      "evidence": "2026-10-27: Windows PowerShell 5.1 CI — 18/18 passed (run 40502981519): BOM, ParseFile всех 7 PS1, 4 сценария setup с настоящим venv и заглушками загрузок. Mac — 139 passed, 11 skipped (Windows/PowerShell). Ruff и diff --check прошли. Ошибки со скриншота исправлены и покрыты CI. Статус in_progress сохраняется для полной приёмки: fresh init.sh остановился на timeout pypi.org/simple/tokenizers/; загрузка моделей/CUDA на целевом ПК не проверена. PR #1."
     },
     {
       "id": "F01-device",
